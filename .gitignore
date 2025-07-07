@@ -1,0 +1,47 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+
+# Media files
+*.mp4
+*.mp3
+*.jpg
+*.jpeg
+*.png
+*.gif           
+
+# Flutter/Dart/Pub related
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+**/build/
+
+# Android artifacts
+/android/app/debug
+/android/app/profile
+/android/app/release
+
+# VS Code
+.vscode/
+
+# Test images and storage
+/memory_ai_poc/test_images/
+/storage/
+
+# Obfuscation & symbolication
+app.*.symbols
+app.*.map.json
+
+# IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+memory_ai_poc/test_images/
