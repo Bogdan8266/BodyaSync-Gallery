@@ -44,56 +44,48 @@ def get_dominant_color(image_path):
 
 def apply_frame(photo, frame_path, config):
     """
-    Накладає рамку на фото з розширеними опціями масштабування.
-    Підтримує пропорційний 'scale' та незалежні 'scale_x', 'scale_y'.
+    Правильно обробляє рамки будь-якого розміру. Якщо рамка більша за фото,
+    фінальне зображення розширюється, щоб вмістити всю рамку.
     """
     try:
-        # Завантажуємо шаблон рамки
+        # 1. Завантажуємо шаблон рамки та параметри
         frame_template = Image.open(frame_path).convert("RGBA")
-        
-        # Отримуємо параметри з конфігурації
         params = config.get(os.path.basename(frame_path), {})
-        
-        # <<< ПОЧАТОК НОВОЇ ЛОГІКИ МАСШТАБУВАННЯ >>>
-        
-        # Отримуємо всі можливі параметри масштабування
+
+        # 2. Розраховуємо новий розмір для РАМКИ на основі розміру ФОТО
         scale = params.get("scale", 1.0)
-        scale_x = params.get("scale_x") # За замовчуванням буде None, якщо немає
-        scale_y = params.get("scale_y") # За замовчуванням буде None, якщо немає
+        scale_x = params.get("scale_x")
+        scale_y = params.get("scale_y")
         
-        # Визначаємо фінальний розмір рамки
-        # Пріоритет у незалежного масштабування
         if scale_x is not None and scale_y is not None:
-            # Використовуємо незалежне розтягування
-            print(f"   - Використовуємо незалежне масштабування: x={scale_x}, y={scale_y}")
             new_frame_width = int(photo.width * scale_x)
             new_frame_height = int(photo.height * scale_y)
         else:
-            # Використовуємо звичайне пропорційне масштабування
-            print(f"   - Використовуємо пропорційне масштабування: {scale}")
             new_frame_width = int(photo.width * scale)
             new_frame_height = int(photo.height * scale)
         
-        # <<< КІНЕЦЬ НОВОЇ ЛОГІКИ МАСШТАБУВАННЯ >>>
-            
-        # Отримуємо зміщення
+        # 3. Масштабуємо рамку
+        resized_frame = frame_template.resize((new_frame_width, new_frame_height), Image.Resampling.LANCZOS)
+
+        # 4. <<< ГОЛОВНЕ ВИПРАВЛЕННЯ >>>
+        # Створюємо полотно розміром зі ЗМІНЕНУ РАМКУ. Це наш новий "контейнер".
+        result_canvas = Image.new("RGBA", resized_frame.size, (0, 0, 0, 0)) 
+
+        # 5. Розраховуємо позицію для ФОТО, щоб воно було по центру цього нового,
+        # потенційно більшого полотна.
+        photo_pos_x = (resized_frame.width - photo.width) // 2
+        photo_pos_y = (resized_frame.height - photo.height) // 2
+
+        # 6. Застосовуємо зсув до позиції ФОТО
         offset_x = params.get("offset_x", 0)
         offset_y = params.get("offset_y", 0)
+        photo_pos_x += offset_x
+        photo_pos_y += offset_y
         
-        # Змінюємо розмір рамки
-        resized_frame = frame_template.resize((new_frame_width, new_frame_height), Image.Resampling.LANCZOS)
-        
-        # Створюємо нове, прозоре полотно розміром з нашу рамку
-        result_canvas = Image.new("RGBA", resized_frame.size, (0, 0, 0, 0))
-        
-        # Розраховуємо позицію для ФОТОГРАФІЇ, щоб вона була в центрі полотна
-        photo_x = (resized_frame.width - photo.width) // 2 + offset_x
-        photo_y = (resized_frame.height - photo.height) // 2 + offset_y
-        
-        # Вставляємо фото на прозоре полотно
-        result_canvas.paste(photo, (photo_x, photo_y))
-        
-        # Вставляємо РАМКУ поверх усього
+        # 7. Вставляємо ФОТО на наше велике полотно
+        result_canvas.paste(photo, (photo_pos_x, photo_pos_y))
+
+        # 8. Накладаємо РАМКУ поверх усього. Вона ідеально заповнить полотно.
         result_canvas.paste(resized_frame, (0, 0), resized_frame)
         
         return result_canvas

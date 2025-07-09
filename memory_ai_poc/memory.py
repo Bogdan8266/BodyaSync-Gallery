@@ -2,142 +2,116 @@ import os
 import random
 import requests
 import json
-import base64
 from datetime import datetime
+from gradio_client import Client, file
 
-# --- Налаштування ---
-OLLAMA_API_URL = "http://localhost:11434/api/generate"  # Адреса твого локального сервера Ollama
-MODEL_NAME = "gemma3:4b"                           # Назва моделі, яку ми завантажили
-IMAGE_FOLDER = "test_images"                            # Папка з тестовими фото
+# --- Налаштування для обох сервісів ---
+HF_SPACE_URL = "bodyapromax2010/bodyasync-image-caption" # "Очі" - для опису
+OLLAMA_API_URL = "http://localhost:11434/api/generate"  # "Душа" - для стилізації тексту
+OLLAMA_MODEL_NAME = "gemma3:1b"                          # Модель для роботи з текстом
+IMAGE_FOLDER = "test_images"
 
-# --- Функція 1: Кодування зображення ---
-# Ollama API вимагає, щоб зображення були у форматі Base64
-def encode_image_to_base64(image_path):
-    """Кодує зображення в рядок Base64."""
-    with open(image_path, "rb") as image_file:
-        return base64.b64encode(image_file.read()).decode('utf-8')
-
-# --- Функція 2: Аналіз зображення за допомогою AI ---
-# Це серце нашої системи. Вона відправляє фото і промпт до нейромережі.
-def analyze_image(image_path):
+# --- Функція 1: Отримуємо "сирий" опис з Hugging Face ---
+def get_raw_english_description(image_path):
     """
-    Аналізує зображення, визначає його вміст, оцінку
-    і чи підходить воно для "спогаду".
+    Звертається до HF Space, щоб отримати детальний технічний опис зображення.
     """
-    print(f"🕵️ Аналізую зображення: {os.path.basename(image_path)}...")
-    
-    encoded_image = encode_image_to_base64(image_path)
-    
-    # Це найважливіша частина - наш "промпт" (завдання для нейромережі).
-    # Ми просимо її повернути відповідь у форматі JSON, щоб її було легко обробити.
-    prompt_text = """
-    Analyze the image and provide a response in JSON format.
-    The JSON object must contain these keys:
-    - "description": A short, three-sentence description of what's in the image.
-    - "is_memory_candidate": A boolean (true or false). It should be true for photos of people, animals, nature, events, and false for screenshots, documents, or boring images.
-    - "emotional_score": An integer from 1 to 10, where 10 is a very emotional or interesting photo.
-    - "tags": A list of 8-16 relevant string tags in Ukrainian (e.g., ["собака", "парк", "літо"]).
-    
-    Provide only the JSON object in your response.
-    """
-    
-    payload = {
-        "model": MODEL_NAME,
-        "prompt": prompt_text,
-        "images": [encoded_image],
-        "stream": False,
-        "format": "json" # Просимо Ollama повернути гарантований JSON
-    }
-    
+    print(f"🕵️ Крок 1: Отримую детальний опис з '{HF_SPACE_URL}'...")
     try:
-        response = requests.post(OLLAMA_API_URL, json=payload)
-        response.raise_for_status() # Перевірка на помилки HTTP (4xx, 5xx)
-        
-        # Відповідь від Ollama приходить у вигляді JSON рядка, який треба ще раз розпарсити
-        response_data = response.json()
-        analysis_json = json.loads(response_data.get("response", "{}"))
-        
-        return analysis_json
-        
-    except requests.exceptions.RequestException as e:
-        print(f"❌ Помилка підключення до Ollama: {e}")
-        return None
-    except json.JSONDecodeError:
-        print("❌ Не вдалося розпарсити JSON відповідь від моделі.")
+        client = Client(HF_SPACE_URL)
+        result = client.predict(file(image_path), api_name="/predict")
+        description = result[0] if isinstance(result, (list, tuple)) else result
+        print("✅ Опис отримано.")
+        return description.strip()
+    except Exception as e:
+        print(f"❌ Помилка на Кроці 1 (Hugging Face): {e}")
         return None
 
-# --- Функція 3: Генерація красивого підпису ---
-def generate_caption(analysis_data, date_info):
-    """Генерує теплий підпис для спогаду на основі аналізу."""
-    print("✍️ Генерую підпис для спогаду...")
+# --- Функція 2: Створюємо "теплий" підпис за допомогою Ollama (ВИПРАВЛЕНА ВЕРСІЯ) ---
+def create_warm_caption_from_description(english_description, date_info):
+    """
+    Бере англійський опис, відправляє його на локальну модель (Gemma)
+    і просить зробити з нього короткий, гарний підпис українською, ВРАХОВУЮЧИ ДАТУ.
+    """
+    print(f"✍️ Крок 2: Генерую теплий підпис за допомогою '{OLLAMA_MODEL_NAME}'...")
     
-    description = analysis_data.get("description", "a nice moment")
-    tags = ", ".join(analysis_data.get("tags", []))
-    
-    # Створюємо новий промпт, тепер для генерації тексту
+    # Промпт тепер явно включає 'Time context', як ти і хотів.
     prompt_text = f"""
-    You are a friendly assistant who creates warm memories. 
-    Write a short, nostalgic, and kind caption in Ukrainian.
-    Use this information:
-    - Photo description: {description}
-    - Photo tags: {tags}
-    - Time context: {date_info}
+    You are a creative assistant. Your task is to transform a detailed, technical image description into a short, warm, and nostalgic caption in Ukrainian.
+
+    Use this information to create the caption:
+    - Technical description (what is in the photo): "{english_description}"
+    - Time context (when the photo was taken): "{date_info}"
+
+    Based on this information, do the following:
+    1. Translate the main idea into Ukrainian.
+    2. Shorten it to 1-2 beautiful, personal-sounding sentences.
+    3. Weave the time context into the caption if it feels natural. For example: "Пам'ятаєш цей чудовий зимовий день?" or "Як же тепло було того літа...".
     
-    Make it sound personal and heartwarming. For example: "Пам'ятаєш цей день?.." or "Поглянь, який чудовий момент!".
-    Write only the caption itself, without any extra text.
+    Write ONLY the final Ukrainian caption, nothing else.
     """
     
-    # Для генерації тексту нам вже не потрібне зображення
     payload = {
-        "model": "gemma3:4b", # Можна використати меншу модель для тексту, наприклад gemma:2b
+        "model": OLLAMA_MODEL_NAME,
         "prompt": prompt_text,
         "stream": False
     }
     
     try:
-        response = requests.post(OLLAMA_API_URL, json=payload)
+        # Переконайся, що твій сервер Ollama запущено!
+        response = requests.post(OLLAMA_API_URL, json=payload, timeout=60)
         response.raise_for_status()
         
         response_data = response.json()
-        return response_data.get("response", "Чудовий спогад!").strip()
-
+        caption = response_data.get("response", "Чудовий спогад!").strip()
+        print("✅ Підпис згенеровано.")
+        return caption
     except requests.exceptions.RequestException as e:
-        print(f"❌ Помилка при генерації підпису: {e}")
+        print(f"❌ Помилка на Кроці 2 (Ollama): {e}. Перевір, чи запущено сервер Ollama.")
         return "Просто гарний день!"
 
-# --- Основна логіка скрипта ---
+# --- Функція 3: Проста перевірка, чи підходить фото для спогаду ---
+def is_good_memory(caption):
+    if not caption: return False
+    stop_words = ["screenshot", "text", "document", "chart", "diagram", "interface", "code"]
+    caption_lower = caption.lower()
+    return not any(word in caption_lower for word in stop_words)
+
+# --- Основна логіка ---
 if __name__ == "__main__":
-    # 1. Знаходимо всі файли в папці test_images
+    if not os.path.isdir(IMAGE_FOLDER):
+        print(f"🛑 Папку '{IMAGE_FOLDER}' не знайдено! Створіть її та додайте фото.")
+        exit()
+        
     all_images = [f for f in os.listdir(IMAGE_FOLDER) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
     
     if not all_images:
-        print(f"Не знайдено зображень у папці {IMAGE_FOLDER}. Додай туди фото.")
+        print(f"Не знайдено зображень у папці '{IMAGE_FOLDER}'.")
     else:
-        # 2. Вибираємо одне випадкове фото для аналізу
         random_image_name = random.choice(all_images)
         image_path = os.path.join(IMAGE_FOLDER, random_image_name)
         
-        # 3. Аналізуємо його
-        analysis = analyze_image(image_path)
+        # КРОК 1: Отримуємо англійський опис
+        raw_description = get_raw_english_description(image_path)
         
-        if analysis:
-            print("\n--- Результати аналізу ---")
-            print(json.dumps(analysis, indent=2, ensure_ascii=False))
-            print("--------------------------\n")
+        if raw_description:
+            print(f"\n--- Сирий опис від Florence-2 ---\n{raw_description}\n---------------------------------\n")
 
-            # 4. Перевіряємо, чи це хороший кандидат для спогаду
-            if analysis.get("is_memory_candidate"):
-                # Отримуємо дату створення файлу (в реальному додатку це буде дата з EXIF)
-                file_stat = os.stat(image_path)
-                creation_date = datetime.fromtimestamp(file_stat.st_mtime)
-                date_info = f"зроблене {creation_date.strftime('%d %B, %Y року')}" # наприклад "зроблене 15 травня, 2024 року"
+            if is_good_memory(raw_description):
+                # Отримуємо дату для передачі в промпт
+                try:
+                    date_info = f"зроблено {datetime.fromtimestamp(os.path.getmtime(image_path)).strftime('%d %B, %Y року')}"
+                except Exception:
+                    date_info = "колись у минулому"
                 
-                # 5. Генеруємо фінальний підпис
-                final_caption = generate_caption(analysis, date_info)
+                # КРОК 2: Генеруємо фінальний підпис, передаючи і опис, і дату
+                final_caption = create_warm_caption_from_description(raw_description, date_info)
                 
                 print("\n🎉🎉🎉 ВАШ СЬОГОДНІШНІЙ СПОГАД! 🎉🎉🎉")
                 print(f"Фото: {random_image_name}")
                 print(f"Підпис: {final_caption}")
                 print("🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉")
             else:
-                print(f"😕 Фото '{random_image_name}' не схоже на хороший спогад. Можливо, це скріншот або документ.")
+                print(f"😕 Фото '{random_image_name}' не схоже на хороший спогад (можливо, це скріншот).")
+        else:
+            print("Не вдалося виконати Крок 1. Перевірте з'єднання та статус Hugging Face Space.")
