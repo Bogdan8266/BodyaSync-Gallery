@@ -16,7 +16,7 @@ OLLAMA_API_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL_NAME = "gemma3:1b"
 
 # --- Налаштування для створення колажу ---
-HF_SPACE_COLLAGE_URL = "bodyapromax2010/black-forest-labs-FLUX.1-dev22" 
+HF_SPACE_COLLAGE_URL = "bodyapromax2010/black-forest-labs-FLUX.1-dev2" 
 IMAGE_FOLDER = "test_images"
 ASSETS_FOLDER = "assets"
 FRAMES_CONFIG_FILE = os.path.join(ASSETS_FOLDER, "frames_config.json")

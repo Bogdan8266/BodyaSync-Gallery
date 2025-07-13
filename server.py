@@ -4,16 +4,25 @@ import os
 import shutil
 import json
 import time
+import random
+import threading
+import uuid
 from datetime import datetime
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from PIL import Image
-from PIL.ExifTags import TAGS
+
+# <--- ВИПРАВЛЕННЯ
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Form
+# server.py
+
+import io # <--- Додай це
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Form, Body, Query # <--- Основне виправлення тут
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse # <--- І це
+from fastapi.responses import FileResponse, JSONResponse
+from PIL import Image, ImageDraw, ImageFont
 import ffmpeg
 from hachoir.parser import createParser
 from hachoir.metadata import extractMetadata
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Body
-import io
+import requests
+from gradio_client import Client as GradioClient, file as gradio_file
 
 # --- Налаштування (без змін) ---
 app = FastAPI(title="My Personal Cloud API")
@@ -21,10 +30,23 @@ STORAGE_PATH = "storage"
 ORIGINALS_PATH = os.path.join(STORAGE_PATH, "originals")
 THUMBNAILS_PATH = os.path.join(STORAGE_PATH, "thumbnails")
 METADATA_FILE = os.path.join(STORAGE_PATH, "metadata.json")
-
+MEMORIES_PATH = os.path.join(STORAGE_PATH, "memories") 
+MUSIC_FOLDER = os.path.join(STORAGE_PATH, "music")
 os.makedirs(ORIGINALS_PATH, exist_ok=True)
 os.makedirs(THUMBNAILS_PATH, exist_ok=True)
+os.makedirs(ORIGINALS_PATH, exist_ok=True)
+os.makedirs(THUMBNAILS_PATH, exist_ok=True)
+os.makedirs(MEMORIES_PATH, exist_ok=True)
+os.makedirs(MUSIC_FOLDER, exist_ok=True)
 
+# --- Налаштування AI ---
+HF_SPACE_CAPTION_URL = "bodyapromax2010/bodyasync-image-caption"
+OLLAMA_API_URL = "http://localhost:11434/api/generate"
+OLLAMA_MODEL_NAME = "gemma3:1b"
+HF_SPACE_COLLAGE_URL = "bodyapromax2010/black-forest-labs-FLUX.1-dev2"
+
+# --- Словник для відстеження асинхронних задач ---
+TASKS = {}
 
 # --- Функції для роботи з метаданими (без змін) ---
 # ... (load_metadata, save_metadata) ...
@@ -111,6 +133,181 @@ def get_original_date(file_path: str) -> float:
     print(f"⚠️ Не вдалося знайти оригінальну дату, використовую fallback: {datetime.fromtimestamp(fallback_timestamp)}")
     return fallback_timestamp
 
+
+def get_raw_english_description(image_path):
+    print(f"   - Крок А: Аналізую фото '{os.path.basename(image_path)}'...")
+    try:
+        client = GradioClient(HF_SPACE_CAPTION_URL)
+        result = client.predict(gradio_file(image_path), api_name="/predict")
+        return (result[0] if isinstance(result, (list, tuple)) else result).strip()
+    except Exception as e:
+        print(f"   - ❌ Помилка аналізу на HF: {e}"); return None
+
+def create_warm_caption_from_description(english_description, date_info):
+    print(f"   - Крок Б: Генерую підпис...")
+    prompt_text = f"You are a creative assistant. Transform this technical description: '{english_description}' into a short, warm, nostalgic caption in Ukrainian, considering it was taken '{date_info}'. Write ONLY the final caption."
+    payload = {"model": OLLAMA_MODEL_NAME, "prompt": prompt_text, "stream": False}
+    try:
+        response = requests.post(OLLAMA_API_URL, json=payload, timeout=60)
+        response.raise_for_status()
+        return response.json().get("response", "").strip() or "Чудовий спогад!"
+    except requests.exceptions.RequestException as e:
+        print(f"   - ❌ Помилка Ollama: {e}"); return None
+
+def is_good_memory(caption):
+    if not caption: return False
+    stop_words = ["screenshot", "text", "document", "chart", "diagram"]
+    return not any(word in caption.lower() for word in stop_words)
+
+# ... і решта твоїх функцій (я їх не буду повторювати) ...
+# Ми припускаємо, що всі твої функції для створення колажу тут присутні
+
+# <--- НОВЕ: Функція-заглушка для вибору музики
+def select_random_music():
+    """Вибирає випадковий трек з папки music."""
+    if not os.path.exists(MUSIC_FOLDER) or not os.listdir(MUSIC_FOLDER):
+        print("⚠️ Папка з музикою порожня або не існує.")
+        return None
+        
+    all_files_in_folder = os.listdir(MUSIC_FOLDER)
+    # <--- НОВИЙ РЯДОК ДЛЯ ДЕБАГУ
+    print(f"🔍 Знайдено в папці '{MUSIC_FOLDER}': {all_files_in_folder}")
+    
+    music_files = [f for f in all_files_in_folder if f.lower().endswith(('.mp3', '.wav', '.ogg', '.m4a'))] # Додав .m4a
+    
+    if not music_files:
+        print("❌ Не знайдено підходящих аудіофайлів (.mp3, .wav, .ogg, .m4a).")
+        return None
+        
+    chosen_file = random.choice(music_files)
+    print(f"🎵 Обрано музичний трек: {chosen_file}")
+    return chosen_file
+
+def create_memory_story_worker(task_id: str):
+    """
+    Ця функція виконує всю важку роботу у фоні.
+    """
+    try:
+        TASKS[task_id] = {"status": "processing", "message": "Selecting photos..."}
+        print(f"[{task_id}] Починаємо процес створення спогаду...")
+        
+        # --- ЕТАП 1: ВІДБІР ФОТОГРАФІЙ (ЦЕ МАЄ БУТИ ТУТ!) ---
+        all_images = [f for f in os.listdir(ORIGINALS_PATH) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+        if len(all_images) < 2:
+            raise Exception("Потрібно мінімум 2 фотографії для роботи.")
+
+        num_to_find = random.randint(2, min(5, len(all_images)))
+        selected_memories, available_images = [], all_images.copy() # <--- ОСЬ ТУТ СТВОРЮЄТЬСЯ ЗМІННА
+
+        while len(selected_memories) < num_to_find and available_images:
+            image_name = random.choice(available_images)
+            available_images.remove(image_name)
+            image_path = os.path.join(ORIGINALS_PATH, image_name)
+            
+            # ... (твій код аналізу фото та генерації підписів) ...
+            raw_description = get_raw_english_description(image_path)
+            if raw_description and is_good_memory(raw_description):
+                date_info = f"зроблено {datetime.fromtimestamp(os.path.getmtime(image_path)).strftime('%d %B, %Y')}"
+                final_caption = create_warm_caption_from_description(raw_description, date_info)
+                if final_caption:
+                    selected_memories.append({"filename": image_name, "caption": final_caption})
+        # --- КІНЕЦЬ ЕТАПУ ВІДБОРУ ---
+
+        if not selected_memories: # <--- Тепер ця перевірка спрацює коректно
+            raise Exception("Не вдалося знайти жодного підходящого фото.")
+            
+        TASKS[task_id]["message"] = "Creating collage..."
+
+        # --- ЕТАП 2: Створення колажу ---
+        collage_filename = f"collage_{task_id}.png"
+        collage_output_path = os.path.join(MEMORIES_PATH, collage_filename)
+        
+        # Передаємо вже готовий список "Дизайнеру"
+        create_collage_and_save(selected_memories, collage_output_path)
+
+        # --- ЕТАП 3: Вибір музики та формування фінальної структури ---
+        TASKS[task_id]["message"] = "Finalizing..."
+        music_file = select_random_music()
+        
+        story_items = []
+        for memory in selected_memories:
+            story_items.append({
+                "type": "image",
+                "imageUrl": f"/original/{memory['filename']}",
+                "caption": memory['caption'],
+            })
+            
+        story_items.append({
+            "type": "collage",
+            "imageUrl": f"/memories/{collage_filename}",
+            "caption": "Ваші найкращі моменти разом!",
+        })
+
+        final_result = {
+            "id": task_id,
+            "title": f"Спогад від {datetime.now().strftime('%d %B')}",
+            "musicUrl": f"/music/{music_file}" if music_file else None,
+            "items": story_items,
+        }
+
+        result_filepath = os.path.join(MEMORIES_PATH, f"{task_id}.json")
+        with open(result_filepath, 'w', encoding='utf-8') as f:
+            json.dump(final_result, f, ensure_ascii=False, indent=2)
+
+        TASKS[task_id] = {"status": "complete", "result": final_result}
+        print(f"[{task_id}] ✅ Спогад успішно створено!")
+
+    except Exception as e:
+        print(f"[{task_id}] 🛑 Помилка під час генерації: {e}")
+        TASKS[task_id] = {"status": "failed", "error": str(e)}
+
+# server.py
+
+# ... (всі твої імпорти та функції-хелпери) ...
+
+# <--- НОВА, ПРАВИЛЬНА ФУНКЦІЯ ДЛЯ СТВОРЕННЯ КОЛАЖУ
+# server.py
+
+def create_collage_and_save(selected_memories: list, output_path: str):
+    """
+    Приймає ВЖЕ ВІДІБРАНИЙ список фото і шлях для збереження.
+    """
+    print("🖼️ Починаємо створення колажу...")
+    
+    # <--- КЛЮЧОВЕ ВИПРАВЛЕННЯ: Додаємо try...except блок
+    try:
+        # --- СЮДИ ТИ ВСТАВЛЯЄШ ВСЮ СВОЮ ЛОГІКУ ГЕНЕРАЦІЇ КОЛАЖУ ---
+        # Наприклад:
+        # selected_filenames = [m['filename'] for m in selected_memories]
+        # dominant_colors = [get_dominant_color(...) for name in selected_filenames]
+        # prompt = chosen_strategy(dominant_colors)
+        # collage = generate_background_with_hf_space(prompt).convert("RGBA")
+        #
+        # ... (розміщення фото на фоні) ...
+        #
+        # collage.save(output_path)
+        # -----------------------------------------------------------------
+
+        # --- ТИМЧАСОВА ЗАГЛУШКА ДЛЯ ПЕРЕВІРКИ ---
+        # Якщо ти хочеш швидко перевірити, розкоментуй цей блок,
+        # а свій код тимчасово закоментуй.
+        print("   - Створення заглушки колажу для тестування...")
+        placeholder_collage = Image.new("RGB", (1080, 1920), (random.randint(0,255), random.randint(0,255), random.randint(0,255)))
+        draw = ImageDraw.Draw(placeholder_collage)
+        draw.text((100, 100), f"Тестовий колаж\n{len(selected_memories)} фото", font=FONT, fill=(255,255,255))
+        placeholder_collage.save(output_path)
+        # --- КІНЕЦЬ ЗАГЛУШКИ ---
+
+        print(f"✅ Колаж успішно збережено у: {output_path}")
+        return True
+    
+    except Exception as e:
+        # Якщо щось пішло не так, ми побачимо детальну помилку в логах
+        print(f"🛑🛑🛑 КРИТИЧНА ПОМИЛКА під час створення колажу: {e}")
+        # Створюємо порожній файл, щоб уникнути помилки 404, але в додатку буде видно, що щось не так
+        Image.new("RGB", (100, 100), (0,0,0)).save(output_path)
+        return False
+# ... (решта твоїх функцій, напр. select_random_music)
 
 # =================================================================
 # ОНОВЛЕНІ ГОЛОВНІ ЕНДПОІНТИ
@@ -223,7 +420,53 @@ async def upload_file_to_path(file: UploadFile = File(...), path: str = Form("")
 
     return {"status": "success", "filename": file.filename}
 
+@app.post("/memories/generate")
+async def generate_memory_story(background_tasks: BackgroundTasks):
+    """Запускає асинхронну задачу генерації спогаду."""
+    task_id = str(uuid.uuid4())
+    TASKS[task_id] = {"status": "starting", "message": "Task received."}
+    # Використовуємо BackgroundTasks від FastAPI для запуску у фоні
+    background_tasks.add_task(create_memory_story_worker, task_id)
+    return {"task_id": task_id}
 
+
+@app.get("/memories/status/{task_id}")
+async def get_memory_status(task_id: str):
+    """Перевіряє статус задачі генерації."""
+    task = TASKS.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task
+
+@app.get("/memories/")
+async def get_all_memories():
+    """Повертає список усіх раніше згенерованих спогадів."""
+    memory_files = [f for f in os.listdir(MEMORIES_PATH) if f.endswith('.json')]
+    all_memories = []
+    for filename in memory_files:
+        try:
+            with open(os.path.join(MEMORIES_PATH, filename), 'r', encoding='utf-8') as f:
+                all_memories.append(json.load(f))
+        except:
+            continue
+    # Сортуємо від новіших до старіших, припускаючи, що ID (uuid) має час
+    all_memories.sort(key=lambda x: x.get('id'), reverse=True)
+    return all_memories
+
+# Ендпоінт для доступу до колажів та музики
+@app.get("/memories/{filename}")
+async def get_memory_asset(filename: str):
+    file_path = os.path.join(MEMORIES_PATH, filename)
+    if os.path.exists(file_path):
+        return FileResponse(file_path)
+    raise HTTPException(status_code=404, detail="Memory asset not found")
+
+@app.get("/music/{filename}")
+async def get_music_asset(filename: str):
+    file_path = os.path.join(MUSIC_FOLDER, filename)
+    if os.path.exists(file_path):
+        return FileResponse(file_path)
+    raise HTTPException(status_code=404, detail="Music asset not found")
 
 
 @app.post("/upload/")

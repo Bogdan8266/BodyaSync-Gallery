@@ -1,5 +1,5 @@
 import 'dart:math';
-import 'package:audioplayers/audioplayers.dart';
+
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -28,8 +28,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:rive/rive.dart' as rive;
 import 'package:shape_of_view_null_safe/shape_of_view_null_safe.dart';
-import 'package:smooth_page_indicator/smooth_page_indicator.dart';
-import 'package:flutter_sticky_header/flutter_sticky_header.dart';
+
 
 // ===============================================================
 // ГЛОБАЛЬНІ ЗМІННІ ТА КОНФІГУРАЦІЯ
@@ -144,43 +143,6 @@ class ApiService {
       throw Exception('Помилка мережі або сервер недоступний: $e');
     }
   }
-
-
-Future<List<MemoryStory>> fetchMemoryStories() async {
-    final baseUrl = await getBaseUrl();
-    if (baseUrl.isEmpty) return [];
-    final response = await http.get(Uri.parse('$baseUrl/memories/'));
-    if (response.statusCode == 200) {
-      final List<dynamic> data = json.decode(utf8.decode(response.bodyBytes));
-      return data.map((storyJson) => MemoryStory.fromJson(storyJson)).toList();
-    } else {
-      throw Exception('Failed to load memories');
-    }
-  }
-
-  Future<String> startMemoryGeneration() async {
-    final baseUrl = await getBaseUrl();
-    if (baseUrl.isEmpty) throw Exception('IP не налаштовано');
-    final response = await http.post(Uri.parse('$baseUrl/memories/generate'));
-    if (response.statusCode == 200) {
-      return json.decode(response.body)['task_id'];
-    } else {
-      throw Exception('Failed to start generation');
-    }
-  }
-
-  Future<Map<String, dynamic>> checkGenerationStatus(String taskId) async {
-    final baseUrl = await getBaseUrl();
-    if (baseUrl.isEmpty) throw Exception('IP не налаштовано');
-    final response = await http.get(Uri.parse('$baseUrl/memories/status/$taskId'));
-    if (response.statusCode == 200) {
-      return json.decode(utf8.decode(response.bodyBytes));
-    } else {
-      throw Exception('Failed to check status');
-    }
-  }
-
-
   Future<List<FileSystemItem>> fetchFileSystemItems(String path) async {
     final baseUrl = await getBaseUrl();
     if (baseUrl.isEmpty) {
@@ -508,30 +470,8 @@ class MainScreen extends StatefulWidget {
   State<MainScreen> createState() => _MainScreenState();
 }
 
-class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateMixin {
+class _MainScreenState extends State<MainScreen> {
   int _selectedIndex = 0;
-
-  // <--- ЗМІНА: Логіка блюру переїхала сюди, щоб покривати весь екран
-  late final AnimationController _blurAnimationController;
-  late final Animation<double> _blurAnimation;
-
-  @override
-  void initState() {
-    super.initState();
-    _blurAnimationController = AnimationController(
-      duration: const Duration(milliseconds: 500),
-      vsync: this,
-    );
-    _blurAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _blurAnimationController, curve: Curves.fastOutSlowIn),
-    );
-  }
-
-  @override
-  void dispose() {
-    _blurAnimationController.dispose();
-    super.dispose();
-  }
 
   void _onItemTapped(int index) {
     setState(() => _selectedIndex = index);
@@ -539,12 +479,9 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
 
   @override
   Widget build(BuildContext context) {
-    // Віджети для кожної вкладки
-    final List<Widget> pages = [
-      GalleryScreen(
-        key: const ValueKey('gallery_page'),
-        blurAnimationController: _blurAnimationController, // Передаємо контролер вниз
-      ),
+    final List<Widget> widgetOptions = <Widget>[
+      // Використовуємо твій виправлений GalleryScreen, він має працювати
+      const GalleryScreen(key: ValueKey('gallery_page')), 
       const FilesScreen(key: ValueKey('files_page')),
       SettingsScreen(key: const ValueKey('settings_page')),
     ];
@@ -552,61 +489,51 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
     return Scaffold(
       extendBodyBehindAppBar: true,
       extendBody: true,
-      // <--- ЗМІНА: AppBar тепер в NestedScrollView, тому тут його немає
-      body: Stack(
-        children: [
-          // Використовуємо NestedScrollView для екрану Галереї,
-          // і звичайний PageTransitionSwitcher для інших екранів.
-          _selectedIndex == 0
-              ? NestedScrollView(
-                  headerSliverBuilder: (BuildContext context, bool innerBoxIsScrolled) {
-                    return <Widget>[
-                      SliverAppBar(
-                        // <--- НОВЕ: Це і є наш ховаючийся AppBar
-                        title: Text('BodyaSync', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
-                        leading: IconButton(icon: const Icon(Icons.person_outline), onPressed: () {}),
-                        actions: [
-                          IconButton(icon: const Icon(Icons.auto_awesome_outlined), onPressed: () {}),
-                          IconButton(icon: const Icon(Icons.search), onPressed: () {}),
-                          IconButton(icon: const Icon(Icons.settings_outlined), onPressed: () => _onItemTapped(2)),
-                        ],
-                        // Властивості для "ховающегося" ефекту
-                        floating: true,
-                        snap: true,
-                        backgroundColor: Theme.of(context).scaffoldBackgroundColor.withOpacity(0.85),
-                        forceElevated: innerBoxIsScrolled,
-                      ),
-                    ];
-                  },
-                  body: pages[0], // Тіло - це наш GalleryScreen
-                )
-              : PageTransitionSwitcher(
-                  duration: const Duration(milliseconds: 400),
-                  transitionBuilder: (child, primary, secondary) => SharedAxisTransition(
-                    animation: primary,
-                    secondaryAnimation: secondary,
-                    transitionType: SharedAxisTransitionType.horizontal,
-                    child: child,
-                  ),
-                  child: pages[_selectedIndex],
-                ),
-          
-          // Шар з блюром (тепер він на найвищому рівні)
-          AnimatedBuilder(
-            animation: _blurAnimation,
-            builder: (context, child) {
-              if (_blurAnimation.value == 0.0) return const SizedBox.shrink();
-              return IgnorePointer(
-                ignoring: _blurAnimationController.status == AnimationStatus.reverse,
-                child: BackdropFilter(
-                  filter: ImageFilter.blur(sigmaX: 5 * _blurAnimation.value, sigmaY: 5 * _blurAnimation.value),
-                  child: Container(color: Colors.black.withOpacity(0.4 * _blurAnimation.value)),
-                ),
-              );
-            },
+
+      // Твій новий AppBar, який виглядає чудово
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.person_outline),
+          onPressed: () {},
+        ),
+        title: Text(
+          'BodyaSync',
+          style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
+        ),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.auto_awesome_outlined),
+            onPressed: () {},
+          ),
+          IconButton(
+            icon: const Icon(Icons.search),
+            onPressed: () {},
+          ),
+          IconButton(
+            icon: const Icon(Icons.settings_outlined),
+            onPressed: () => _onItemTapped(2),
           ),
         ],
       ),
+
+      // <--- ПОВЕРТАЄМО ТІЛО (BODY) НА МІСЦЕ
+      // Це саме та частина, якої не вистачало
+      body: PageTransitionSwitcher(
+        duration: const Duration(milliseconds: 400),
+        transitionBuilder: (child, primaryAnimation, secondaryAnimation) => SharedAxisTransition(
+          animation: primaryAnimation,
+          secondaryAnimation: secondaryAnimation,
+          transitionType: SharedAxisTransitionType.horizontal,
+          child: child,
+        ),
+        // Тепер GalleryScreen буде коректно відображатись тут
+        child: widgetOptions[_selectedIndex],
+      ),
+
+      // <--- ПОВЕРТАЄМО НИЖНЮ ПАНЕЛЬ НАВІГАЦІЇ
       bottomNavigationBar: GlassContainer(
         height: 80,
         width: double.infinity,
@@ -640,173 +567,71 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
 // ===============================================================
 
 
-// main.dart
-
 class MemoryItem {
   final String label;
-  final String date;
-  final String imageUrl; // Будемо використовувати для фону
-  
-  MemoryItem({required this.label, required this.date, required this.imageUrl});
+  final IconData icon; // Тимчасово будемо використовувати іконку
+  final Color color;
+
+  MemoryItem({required this.label, required this.icon, required this.color});
 }
 
 
 class GalleryScreen extends StatefulWidget {
-  // <--- ЗМІНА: Приймаємо контролер блюру ззовні
-  final AnimationController blurAnimationController;
-
-  const GalleryScreen({
-    Key? key,
-    required this.blurAnimationController,
-  }) : super(key: key);
-
+  const GalleryScreen({Key? key}) : super(key: key);
   @override
   State<GalleryScreen> createState() => _GalleryScreenState();
 }
 
-
-
-
-class StoryPage {
-  final String type; // 'photo' or 'collage'
-  final String imageUrl;
-  final String caption;
-  // Тривалість показу сторінки
-  final Duration duration;
-
-  StoryPage({
-    required this.type,
-    required this.imageUrl,
-    required this.caption,
-    this.duration = const Duration(seconds: 5), // Стандартно 5 секунд
-  });
-
-  factory StoryPage.fromJson(Map<String, dynamic> json, String baseUrl) {
-    return StoryPage(
-      type: json['type'],
-      // Додаємо baseUrl до відносного шляху
-      imageUrl: baseUrl + json['image_url'],
-      caption: json['caption'],
-    );
-  }
-}
-
-// Модель для цілої історії-спогаду
-
+// main.dart
 
 // main.dart
 
-// <--- НОВІ МОДЕЛІ ДЛЯ СПОГАДІВ
-class StoryItem {
-  final String type; // 'image' or 'collage'
-  final String imageUrl;
-  final String caption;
-
-  StoryItem({required this.type, required this.imageUrl, required this.caption});
-
-  factory StoryItem.fromJson(Map<String, dynamic> json) {
-    return StoryItem(
-      type: json['type'],
-      imageUrl: json['imageUrl'],
-      caption: json['caption'],
-    );
-  }
-}
-
-class MemoryStory {
-  final String id;
-  final String title;
-  final String? musicUrl;
-  final List<StoryItem> items;
-
-  MemoryStory({required this.id, required this.title, this.musicUrl, required this.items});
-
-  factory MemoryStory.fromJson(Map<String, dynamic> json) {
-    var itemsFromJson = json['items'] as List;
-    List<StoryItem> storyItems = itemsFromJson.map((i) => StoryItem.fromJson(i)).toList();
-    return MemoryStory(
-      id: json['id'],
-      title: json['title'],
-      musicUrl: json['musicUrl'],
-      items: storyItems,
-    );
-  }
-  
-  // Обкладинка для каруселі - це завжди останній елемент (колаж)
-  String get coverImageUrl => items.last.imageUrl;
-}
-
-class _GalleryScreenState extends State<GalleryScreen> {
+class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProviderStateMixin {
   late Future<List<GalleryItem>> _galleryItemsFuture;
+  late final AnimationController _blurAnimationController;
+  late final Animation<double> _blurAnimation;
   late final PageController _memoriesPageController;
-late Future<List<MemoryStory>> _memoriesFuture;
-bool _isGenerating = false;
-  //final List<MemoryItem> _dummyMemories = [
-   // MemoryItem(label: 'Подорож до Карпат', date: '11 липня 2023', imageUrl: 'https://images.unsplash.com/photo-1611427020646-f6fa07820d14?q=80&w=800'),
-    //MemoryItem(label: 'Вихідні на морі', date: '20 серпня 2023', imageUrl: 'https://images.unsplash.com/photo-1505118380757-91f5f5632de0?q=80&w=800'),
-  //  MemoryItem(label: 'Осінній ліс', date: '15 жовтня 2023', imageUrl: 'https://images.unsplash.com/photo-1447752875215-b2761acb3c5d?w=800'),
-  //  MemoryItem(label: 'Новий Рік', date: '31 грудня 2023', imageUrl: 'https://images.unsplash.com/photo-1573690706484-86f444f0b940?q=80&w=800'),
- // ];
+
+  final List<MemoryItem> _dummyMemories = [
+    MemoryItem(label: 'Рік тому', icon: Icons.cake_outlined, color: Colors.blue.shade300),
+    MemoryItem(label: 'Поїздка в гори', icon: Icons.terrain_outlined, color: Colors.green.shade300),
+    MemoryItem(label: 'Сонячний день', icon: Icons.wb_sunny_outlined, color: Colors.orange.shade300),
+    MemoryItem(label: 'Вечір з друзями', icon: Icons.people_outline, color: Colors.purple.shade300),
+  ];
 
   @override
   void initState() {
     super.initState();
     _refreshGallery();
-    _memoriesPageController = PageController(viewportFraction: 0.88);
-    _refreshMemories();
-  }
-Future<void> _refreshMemories() async {
-    if (mounted) {
-      setState(() {
-        _memoriesFuture = apiService.fetchMemoryStories();
-      });
-    }
-  }
-
-
-Future<void> _generateNewMemory() async {
-    setState(() => _isGenerating = true);
     
-    try {
-      final taskId = await apiService.startMemoryGeneration();
-      
-      // Починаємо опитування
-      Timer.periodic(const Duration(seconds: 3), (timer) async {
-        if (!mounted) {
-          timer.cancel();
-          return;
-        }
-        
-        final status = await apiService.checkGenerationStatus(taskId);
-        if (status['status'] == 'complete') {
-          timer.cancel();
-          setState(() => _isGenerating = false);
-          _refreshMemories(); // Оновлюємо список, щоб побачити новий спогад
-        } else if (status['status'] == 'failed') {
-          timer.cancel();
-          setState(() => _isGenerating = false);
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Помилка генерації: ${status['error']}')));
-        }
-        // Якщо 'processing', то нічого не робимо, просто чекаємо наступного разу
-      });
-      
-    } catch(e) {
-      setState(() => _isGenerating = false);
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Не вдалося запустити генерацію: $e')));
-    }
+    _blurAnimationController = AnimationController(
+      duration: const Duration(milliseconds: 500),
+      vsync: this,
+    );
+    _blurAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(parent: _blurAnimationController, curve: Curves.fastOutSlowIn),
+    );
+    _memoriesPageController = PageController(viewportFraction: 0.85);
   }
-
 
   @override
   void dispose() {
+    _blurAnimationController.dispose();
     _memoriesPageController.dispose();
     super.dispose();
   }
   
   Future<void> _refreshGallery() async {
+    // Використовуємо .catchError для обробки помилок, щоб уникнути "невпійманих" винятків
+    final future = apiService.fetchGalleryItems().catchError((e) {
+      print("Error loading gallery: $e");
+      // Повертаємо пустий список, щоб показати повідомлення в UI, а не помилку
+      return <GalleryItem>[];
+    });
+
     if (mounted) {
       setState(() {
-        _galleryItemsFuture = apiService.fetchGalleryItems();
+        _galleryItemsFuture = future;
       });
     }
   }
@@ -820,305 +645,227 @@ Future<void> _generateNewMemory() async {
     }
     return groupedItems;
   }
-  
+
   Widget _buildMemoriesCarousel() {
-  return FutureBuilder<List<MemoryStory>>(
-    // 1. Використовуємо FutureBuilder для асинхронного завантаження списку спогадів
-    future: _memoriesFuture,
-    builder: (context, snapshot) {
-      // Поки дані завантажуються, показуємо індикатор
-      if (snapshot.connectionState == ConnectionState.waiting) {
-        return const SizedBox(height: 220, child: Center(child: CircularProgressIndicator()));
-      }
-
-      // Якщо сталася помилка
-      if (snapshot.hasError) {
-        return SizedBox(height: 220, child: Center(child: Text('Помилка завантаження спогадів: ${snapshot.error}')));
-      }
-
-      // Отримуємо список спогадів
-      final memories = snapshot.data ?? [];
-
-      // 2. Будуємо основний віджет, що містить заголовок, кнопку та саму карусель
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // 3. Заголовок "Спогади" та кнопка "Створити новий"
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text('Спогади', style: Theme.of(context).textTheme.titleLarge),
-                // Показуємо або індикатор завантаження, або кнопку
-                _isGenerating
-                    ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 3))
-                    : IconButton(
-                        icon: const Icon(Icons.add_circle_outline),
-                        onPressed: _generateNewMemory,
-                        tooltip: 'Створити новий спогад',
-                      )
-              ],
-            ),
-          ),
-
-          // 4. Якщо спогадів немає, показуємо інформативне повідомлення
-          if (memories.isEmpty)
-            SizedBox(
-              height: 180,
-              child: Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Text(
-                    'У вас ще немає спогадів. Спробуйте створити новий!',
-                    textAlign: TextAlign.center,
-                    style: Theme.of(context).textTheme.bodyLarge,
-                  ),
+    return SizedBox(
+      height: 160,
+      child: PageView.builder(
+        controller: _memoriesPageController,
+        itemCount: _dummyMemories.length,
+        padEnds: false,
+        itemBuilder: (context, index) {
+          final memory = _dummyMemories[index];
+          return AnimatedBuilder(
+            animation: _memoriesPageController,
+            builder: (context, child) {
+              double value = 1.0;
+              if (_memoriesPageController.position.haveDimensions) {
+                value = (_memoriesPageController.page ?? 0) - index;
+                value = (1 - (value.abs() * 0.15)).clamp(0.0, 1.0);
+              }
+              return Center(
+                child: SizedBox(
+                  height: Curves.easeOut.transform(value) * 140,
+                  width: Curves.easeOut.transform(value) * 300,
+                  child: child,
                 ),
-              ),
-            )
-          // 5. Інакше, показуємо карусель
-          else
-            SizedBox(
-              height: 220,
-              child: PageView.builder(
-                controller: _memoriesPageController,
-                itemCount: memories.length,
-                itemBuilder: (context, index) {
-                  final memory = memories[index];
-                  // Кожна картка - це окремий віджет, на який можна натиснути
-                  return GestureDetector(
-                    onTap: () {
-                      // При натисканні відкриваємо новий екран StoryViewerScreen
-                      Navigator.of(context).push(
-                        MaterialPageRoute(builder: (_) => StoryViewerScreen(story: memory)),
-                      );
-                    },
-                    child: AnimatedBuilder(
-                      animation: _memoriesPageController,
-                      builder: (context, child) {
-                        // Анімація для зміни розміру неактивних карток
-                        double pageOffset = 0;
-                        if (_memoriesPageController.position.haveDimensions) {
-                          pageOffset = (_memoriesPageController.page ?? 0) - index;
-                        }
-                        return Transform.scale(
-                          scale: (1 - (pageOffset.abs() * 0.1)).clamp(0.9, 1.0),
-                          child: child,
-                        );
-                      },
-                      child: Card(
-                        elevation: 2,
-                        margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-                        clipBehavior: Clip.antiAlias,
-                        child: Stack(
-                          fit: StackFit.expand,
-                          children: [
-                            // Фон з картинкою (колажем) та ефектом паралаксу
-                            FutureBuilder<String>(
-                              future: apiService.getBaseUrl(),
-                              builder: (context, urlSnapshot) {
-                                if (!urlSnapshot.hasData || urlSnapshot.data!.isEmpty) return const SizedBox.shrink();
-                                final imageUrl = urlSnapshot.data! + memory.coverImageUrl;
-                                
-                                return AnimatedBuilder(
-                                  animation: _memoriesPageController,
-                                  builder: (context, child) {
-                                    double pageOffset = 0;
-                                    if (_memoriesPageController.position.haveDimensions) {
-                                      pageOffset = (_memoriesPageController.page ?? 0) - index;
-                                    }
-                                    // Рухаємо фон в протилежному напрямку для ефекту паралаксу
-                                    return Transform.translate(
-                                      offset: Offset(-pageOffset * 50, 0),
-                                      child: child,
-                                    );
-                                  },
-                                  child: CachedNetworkImage(
-                                    imageUrl: imageUrl,
-                                    fit: BoxFit.cover,
-                                    placeholder: (c, u) => Container(color: Colors.grey.shade300),
-                                    errorWidget: (c, u, e) => const Icon(Icons.error),
-                                  ),
-                                );
-                              }
-                            ),
-                            // Градієнт для кращої читабельності тексту
-                            const DecoratedBox(
-                              decoration: BoxDecoration(
-                                gradient: LinearGradient(
-                                  begin: Alignment.topCenter,
-                                  end: Alignment.bottomCenter,
-                                  colors: [Colors.transparent, Colors.black87],
-                                  stops: [0.5, 1.0],
-                                ),
-                              ),
-                            ),
-                            // Текст (заголовок спогаду)
-                            Positioned(
-                              bottom: 16,
-                              left: 16,
-                              right: 16,
-                              child: Text(
-                                memory.title,
-                                style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.bold,
-                                  shadows: [const Shadow(blurRadius: 4)]
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
+              );
+            },
+            child: Card(
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+              color: Theme.of(context).colorScheme.surfaceVariant.withOpacity(0.5),
+              elevation: 0,
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(memory.icon, color: memory.color, size: 28),
+                      ],
+                    ),
+                    Text(
+                      memory.label,
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.bold,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant
                       ),
                     ),
-                  );
-                },
-              ),
-            ),
-          
-          // 6. Індикатори-крапки під каруселлю (з'являються, тільки якщо є спогади)
-          if (memories.isNotEmpty)
-            Center(
-              child: Padding(
-                padding: const EdgeInsets.only(top: 8.0, bottom: 8.0),
-                child: SmoothPageIndicator(
-                  controller: _memoriesPageController,
-                  count: memories.length,
-                  effect: WormEffect(
-                    dotHeight: 8,
-                    dotWidth: 8,
-                    activeDotColor: Theme.of(context).colorScheme.primary,
-                    dotColor: Theme.of(context).colorScheme.onSurface.withOpacity(0.2),
-                  ),
+                  ],
                 ),
               ),
             ),
-        ],
-      );
-    },
-  );
-}
+          );
+        },
+      ),
+    );
+  }
 
-
+  // <--- ОСНОВНІ ЗМІНИ ТУТ (метод build)
   @override
   Widget build(BuildContext context) {
     return FutureBuilder<List<GalleryItem>>(
       future: _galleryItemsFuture,
       builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.none || snapshot.connectionState == ConnectionState.waiting) {
+        // Ми не показуємо помилку тут, бо обробили її в _refreshGallery
+        if (snapshot.connectionState == ConnectionState.waiting && !snapshot.hasData) {
           return const Center(child: CircularProgressIndicator());
         }
-        if (snapshot.hasError) {
-          return Center(child: Padding(padding: const EdgeInsets.all(16.0), child: Text('Помилка: ${snapshot.error}', textAlign: TextAlign.center)));
-        }
-
-        final items = snapshot.data ?? [];
         
-        return CustomScrollView(
-          slivers: [
-            SliverToBoxAdapter(
-              child: _buildMemoriesCarousel(),
-            ),
-            
-            if (items.isEmpty)
-              const SliverFillRemaining(
-                child: Center(child: Text('Ваша галерея порожня')),
-              )
-            else
-              ..._groupItemsByDate(items).entries.map((entry) {
-                final date = entry.key;
-                final itemsForDate = entry.value;
+        // Перевіряємо, чи є IP адреса, якщо список порожній
+        if (!snapshot.hasData || snapshot.data!.isEmpty) {
+            return Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Text('Ваша галерея порожня.'),
+                  const SizedBox(height: 10),
+                  ElevatedButton.icon(
+                    onPressed: _refreshGallery,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Оновити'),
+                  )
+                ],
+              ),
+            );
+        }
+        
+        final groupedItems = _groupItemsByDate(snapshot.data!);
+        final sortedDates = groupedItems.keys.toList()..sort((a, b) => b.compareTo(a));
 
-                return SliverStickyHeader(
-                  header: Container(
-                    // <--- ВИПРАВЛЕННЯ 1: Робимо фон повністю непрозорим
-                    color: Theme.of(context).scaffoldBackgroundColor,
-                    height: 50.0,
-                    padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                    alignment: Alignment.centerLeft,
-                    child: Text(formatDateHeader(date), style: Theme.of(context).textTheme.titleLarge),
-                  ),
-                  sliver: SliverPadding( // Додаємо відступи навколо сітки
-                    padding: const EdgeInsets.all(4.0),
-                    sliver: SliverGrid(
+        // Ця структура правильна: Stack для накладання блюру поверх контенту.
+        return Stack(
+          children: [
+            // Весь контент (карусель + список) тепер всередині одного ListView
+            RefreshIndicator(
+              onRefresh: _refreshGallery,
+              child: ListView.builder(
+                // Відступи тепер застосовуються до всього списку
+                padding: EdgeInsets.only(
+                  top: MediaQuery.of(context).padding.top + kToolbarHeight,
+                  bottom: MediaQuery.of(context).padding.bottom + 90,
+                ),
+                // Кількість елементів = 1 (для каруселі) + кількість груп фото
+                itemCount: sortedDates.length + 1,
+                itemBuilder: (context, index) {
+                  // Перший елемент - це завжди карусель
+                  if (index == 0) {
+                    return _buildMemoriesCarousel();
+                  }
+
+                  // Решта елементів - це групи фото
+                  final dateIndex = index - 1;
+                  final date = sortedDates[dateIndex];
+                  final itemsForDate = groupedItems[date]!;
+
+                  // Повертаємо наш старий добрий StickyHeader
+                  return StickyHeader(
+                    header: Container(
+                      height: 50.0,
+                      color: Theme.of(context).scaffoldBackgroundColor.withOpacity(0.95),
+                      padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                      alignment: Alignment.centerLeft,
+                      child: Text(formatDateHeader(date), style: Theme.of(context).textTheme.titleLarge),
+                    ),
+                    content: GridView.builder(
+                      padding: const EdgeInsets.fromLTRB(4.0, 4.0, 4.0, 16.0), // Додаємо відступ знизу
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
                       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
                         crossAxisCount: 4,
                         crossAxisSpacing: 4,
                         mainAxisSpacing: 4,
                       ),
-                      delegate: SliverChildBuilderDelegate(
-                        (context, index) {
-                          final item = itemsForDate[index];
-                          return OpenContainer(
-                            transitionDuration: const Duration(milliseconds: 500),
-                            tappable: false,
-                            closedColor: Colors.transparent, openColor: Colors.black, middleColor: Colors.black,
-                            closedElevation: 0, openElevation: 0,
-                            closedBuilder: (ctx, open) => GestureDetector(
-                              onTap: () {
-                                widget.blurAnimationController.forward();
-                                open();
-                              },
-                              // <--- ВИПРАВЛЕННЯ 2: Код для прев'ю, який був пропущений
-                              child: ClipRRect(
-                                borderRadius: BorderRadius.circular(8.0),
-                                child: Stack(
-                                  fit: StackFit.expand,
-                                  children: [
-                                    FutureBuilder<String>(
-                                      future: apiService.getBaseUrl(),
-                                      builder: (context, urlSnapshot) {
-                                        if (!urlSnapshot.hasData || urlSnapshot.data!.isEmpty) return const SizedBox.shrink();
-                                        final thumbnailUrl = '${urlSnapshot.data}/thumbnail/${item.thumbnail}';
-                                        return CachedNetworkImage(
-                                          imageUrl: thumbnailUrl,
-                                          fit: BoxFit.cover,
-                                          placeholder: (c, u) => Container(color: Colors.grey.withOpacity(0.1)),
-                                          errorWidget: (c, u, e) => const Icon(Icons.error),
-                                        );
-                                      },
-                                    ),
-                                    if (item.type == 'video')
-                                      Center(
-                                        child: Container(
-                                          decoration: BoxDecoration(color: Colors.black.withOpacity(0.5), shape: BoxShape.circle),
-                                          child: const Icon(Icons.play_arrow, color: Colors.white, size: 24),
-                                        ),
+                      itemCount: itemsForDate.length,
+                      itemBuilder: (context, gridIndex) {
+                        final item = itemsForDate[gridIndex];
+                        // OpenContainer залишається таким самим, як і в попередньому кроці
+                        return OpenContainer(
+                          transitionDuration: const Duration(milliseconds: 500),
+                          transitionType: ContainerTransitionType.fade,
+                          closedColor: Colors.transparent,
+                          openColor: Colors.black,
+                          middleColor: Colors.black,
+                          closedElevation: 0,
+                          openElevation: 0,
+                          tappable: false,
+                          openBuilder: (ctx, _) => MediaViewerScreen(
+                            galleryItems: snapshot.data!,
+                            initialIndex: snapshot.data!.indexOf(item),
+                          ),
+                          closedBuilder: (ctx, open) => GestureDetector(
+                            onTap: () {
+                              _blurAnimationController.forward();
+                              open();
+                            },
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(8.0),
+                              child: Stack(
+                                fit: StackFit.expand,
+                                children: [
+                                  FutureBuilder<String>(
+                                    future: apiService.getBaseUrl(),
+                                    builder: (context, urlSnapshot) {
+                                      if (!urlSnapshot.hasData || urlSnapshot.data!.isEmpty) return const SizedBox.shrink();
+                                      return CachedNetworkImage(
+                                        imageUrl: '${urlSnapshot.data}/thumbnail/${item.thumbnail}',
+                                        fit: BoxFit.cover,
+                                        placeholder: (c, u) => Container(color: Colors.grey.withOpacity(0.1)),
+                                        errorWidget: (c, u, e) => const Icon(Icons.error),
+                                      );
+                                    },
+                                  ),
+                                  if (item.type == 'video')
+                                    Center(
+                                      child: Container(
+                                        decoration: BoxDecoration(color: Colors.black.withOpacity(0.5), shape: BoxShape.circle),
+                                        child: const Icon(Icons.play_arrow, color: Colors.white, size: 24),
                                       ),
-                                  ],
-                                ),
+                                    ),
+                                ],
                               ),
                             ),
-                            // <--- ВИПРАВЛЕННЯ 3: Передаємо правильні параметри
-                            openBuilder: (ctx, close) => MediaViewerScreen(
-                              galleryItems: items, // Повний список
-                              initialIndex: items.indexOf(item), // Індекс у повному списку
-                            ),
-                            onClosed: (_) => widget.blurAnimationController.reverse(),
-                          );
-                        },
-                        childCount: itemsForDate.length,
-                      ),
+                          ),
+                          onClosed: (_) {
+                            _blurAnimationController.reverse();
+                          },
+                        );
+                      },
+                    ),
+                  );
+                },
+              ),
+            ),
+            
+            // Шар з блюром залишається без змін, він працює коректно
+            AnimatedBuilder(
+              animation: _blurAnimation,
+              builder: (context, child) {
+                if (_blurAnimation.value == 0.0) {
+                  return const SizedBox.shrink();
+                }
+                return IgnorePointer(
+                  ignoring: _blurAnimationController.status == AnimationStatus.reverse,
+                  child: BackdropFilter(
+                    filter: ImageFilter.blur(
+                      sigmaX: _blurAnimation.value * 5,
+                      sigmaY: _blurAnimation.value * 5,
+                    ),
+                    child: Container(
+                      color: Colors.black.withOpacity(_blurAnimation.value * 0.4),
                     ),
                   ),
                 );
-              }).toList(),
-              
-              SliverToBoxAdapter(
-                 child: SizedBox(height: MediaQuery.of(context).padding.bottom + 90),
-              )
+              },
+            ),
           ],
         );
       },
     );
   }
 }
-
-
-
-
 
 extension StringCasingExtension on String {
   String capitalize() => isNotEmpty ? '${this[0].toUpperCase()}${substring(1)}' : '';
@@ -2498,219 +2245,6 @@ SwitchListTile(
           child: Text(description, style: descriptionStyle),
         ),
       ],
-    );
-  }
-}
-
-
-
-class StoryViewerScreen extends StatefulWidget {
-  final MemoryStory story;
-
-  const StoryViewerScreen({Key? key, required this.story}) : super(key: key);
-
-  @override
-  _StoryViewerScreenState createState() => _StoryViewerScreenState();
-}
-
-class _StoryViewerScreenState extends State<StoryViewerScreen> with SingleTickerProviderStateMixin {
-  late final PageController _pageController;
-  late final AnimationController _animController;
-  final _audioPlayer = AudioPlayer();
-  
-  int _currentIndex = 0;
-
-  @override
-  void initState() {
-    super.initState();
-    _pageController = PageController();
-    _animController = AnimationController(vsync: this);
-    
-    // <--- ЗМІНА 1: Ми більше не намагаємося перемкнути сторінку тут.
-    // Ми лише запускаємо логіку анімації для першого елемента.
-    _startStoryAnimation(0);
-
-    // <--- ЗМІНА 2: Використовуємо 'addPostFrameCallback', щоб безпечно перейти на першу сторінку
-    // ПІСЛЯ того, як віджет буде побудовано.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) {
-        _pageController.jumpToPage(0); // Стрибаємо на першу сторінку
-        
-        // Запускаємо музику тільки після того, як все готово
-        if (widget.story.musicUrl != null) {
-          apiService.getBaseUrl().then((baseUrl) {
-            if(baseUrl.isNotEmpty && mounted) {
-              final fullMusicUrl = baseUrl + widget.story.musicUrl!;
-              _audioPlayer.play(UrlSource(fullMusicUrl));
-            }
-          });
-        }
-      }
-    });
-  }
-  
-  // <--- ЗМІНА 3: Спрощуємо функцію, тепер вона керує тільки анімацією
-  void _startStoryAnimation(int index) {
-    _animController.stop();
-    _animController.reset();
-    _animController.duration = const Duration(seconds: 7);
-    _animController.forward();
-    
-    // Видаляємо старий слухач, щоб уникнути дублювання, і додаємо новий
-    _animController.removeStatusListener(_onAnimationCompleted);
-    _animController.addStatusListener(_onAnimationCompleted);
-
-    if(mounted) setState(() => _currentIndex = index);
-  }
-  
-  // <--- НОВЕ: Виносимо логіку завершення анімації в окремий метод
-  void _onAnimationCompleted(AnimationStatus status) {
-    if (status == AnimationStatus.completed) {
-      _nextPage();
-    }
-  }
-
-  void _nextPage() {
-    if (_currentIndex < widget.story.items.length - 1) {
-      final nextIndex = _currentIndex + 1;
-      _pageController.animateToPage(nextIndex, duration: const Duration(milliseconds: 300), curve: Curves.easeIn);
-      _startStoryAnimation(nextIndex);
-    } else {
-      Navigator.of(context).pop();
-    }
-  }
-  
-  void _previousPage() {
-    if (_currentIndex > 0) {
-      final prevIndex = _currentIndex - 1;
-      _pageController.animateToPage(prevIndex, duration: const Duration(milliseconds: 300), curve: Curves.easeIn);
-      _startStoryAnimation(prevIndex);
-    } else {
-      // Перезапускаємо анімацію для першої сторінки
-      _startStoryAnimation(0);
-    }
-  }
-  
-  void _handleTapUp(TapUpDetails details) {
-    final screenWidth = MediaQuery.of(context).size.width;
-    final tapPosition = details.globalPosition.dx;
-    
-    if (tapPosition < screenWidth / 3) {
-      _previousPage();
-    } 
-    else {
-      _nextPage();
-    }
-  }
-
-
-  @override
-  void dispose() {
-    _animController.removeStatusListener(_onAnimationCompleted);
-    _animController.dispose();
-    _pageController.dispose();
-    _audioPlayer.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    // Решта методу build залишається такою ж, як у попередній версії,
-    // оскільки вона була правильною.
-    final storyItems = widget.story.items;
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: GestureDetector(
-        onTapUp: _handleTapUp,
-        onLongPress: () { 
-          _animController.stop();
-          _audioPlayer.pause();
-        },
-        onLongPressUp: () { 
-          _animController.forward();
-          _audioPlayer.resume();
-        },
-        child: Stack(
-          children: [
-            PageView.builder(
-              controller: _pageController,
-              physics: const NeverScrollableScrollPhysics(),
-              itemCount: storyItems.length,
-              // <--- ЗМІНА 4: Слухаємо, коли користувач вручну змінює сторінку (якщо б скрол був увімкнений)
-              // Це не обов'язково зараз, але корисно для майбутнього.
-              onPageChanged: (index) {
-                // Синхронізуємо анімацію, якщо сторінка змінилась
-                if (index != _currentIndex) {
-                  _startStoryAnimation(index);
-                }
-              },
-              itemBuilder: (context, index) {
-                final item = storyItems[index];
-                return FutureBuilder<String>(
-                  future: apiService.getBaseUrl(),
-                  builder: (context, urlSnapshot) {
-                    if (!urlSnapshot.hasData || urlSnapshot.data!.isEmpty) {
-                      return const Center(child: CircularProgressIndicator(color: Colors.white24));
-                    }
-                    return Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        CachedNetworkImage(
-                          imageUrl: urlSnapshot.data! + item.imageUrl,
-                          fit: BoxFit.contain,
-                          placeholder: (c, u) => const Center(child: CircularProgressIndicator(color: Colors.white24)),
-                          errorWidget: (c, u, e) => const Center(child: Icon(Icons.error, color: Colors.white)),
-                        ),
-                        DecoratedBox(
-                          decoration: BoxDecoration(
-                            gradient: LinearGradient(
-                              begin: Alignment.topCenter, end: Alignment.bottomCenter,
-                              colors: [Colors.black.withOpacity(0.4), Colors.transparent, Colors.black.withOpacity(0.6)],
-                              stops: const [0.0, 0.6, 1.0],
-                            ),
-                          ),
-                        ),
-                        Positioned(
-                          bottom: 48, left: 16, right: 16,
-                          child: Text(item.caption, style: Theme.of(context).textTheme.titleLarge?.copyWith(color: Colors.white, shadows: [const Shadow(blurRadius: 8)]), textAlign: TextAlign.center),
-                        )
-                      ],
-                    );
-                  }
-                );
-              },
-            ),
-            Positioned(
-              top: 40, left: 8, right: 8,
-              child: Row(
-                children: List.generate(storyItems.length, (index) => Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 2.0),
-                    child: AnimatedBuilder(
-                      animation: _animController,
-                      builder: (context, child) {
-                        return LinearProgressIndicator(
-                          value: (index == _currentIndex)
-                              ? _animController.value
-                              : (index < _currentIndex ? 1.0 : 0.0),
-                          backgroundColor: Colors.white38,
-                          valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
-                        );
-                      },
-                    ),
-                  ),
-                )),
-              ),
-            ),
-            Positioned(
-                top: 50,
-                right: 8,
-                child: IconButton(
-                    icon: const Icon(Icons.close, color: Colors.white),
-                    onPressed: () => Navigator.of(context).pop())),
-          ],
-        ),
-      ),
     );
   }
 }
