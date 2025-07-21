@@ -7,16 +7,12 @@ import time
 import random
 import threading
 import uuid
+import io
+import traceback
 from datetime import datetime
 
-# <--- ВИПРАВЛЕННЯ
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Form
-# server.py
-
-import io # <--- Додай це
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Form, Body, Query # <--- Основне виправлення тут
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse # <--- І це
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Form, Body, Query
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from PIL import Image, ImageDraw, ImageFont
 import ffmpeg
 from hachoir.parser import createParser
@@ -24,29 +20,51 @@ from hachoir.metadata import extractMetadata
 import requests
 from gradio_client import Client as GradioClient, file as gradio_file
 
-# --- Налаштування (без змін) ---
+try:
+    # Новий спосіб (Pillow >= 9.1.0)
+    LANCZOS_FILTER = Image.Resampling.LANCZOS
+    BICUBIC_FILTER = Image.Resampling.BICUBIC
+except AttributeError:
+    # Старий спосіб
+    print("⚠️ Ваша версія Pillow застаріла. Використовуються старі константи. Рекомендується оновити: pip install --upgrade Pillow")
+    LANCZOS_FILTER = Image.LANCZOS
+    BICUBIC_FILTER = Image.BICUBIC
+# ======================================================================
+# БЛОК 1: ЗАГАЛЬНА КОНФІГУРАЦІЯ
+# ======================================================================
 app = FastAPI(title="My Personal Cloud API")
-STORAGE_PATH = "storage"
+
+# --- Шляхи ---
+# Використовуємо абсолютні шляхи для надійності
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+STORAGE_PATH = os.path.join(SCRIPT_DIR, "storage")
+ASSETS_FOLDER = os.path.join(SCRIPT_DIR, "assets")
+
 ORIGINALS_PATH = os.path.join(STORAGE_PATH, "originals")
 THUMBNAILS_PATH = os.path.join(STORAGE_PATH, "thumbnails")
-METADATA_FILE = os.path.join(STORAGE_PATH, "metadata.json")
-MEMORIES_PATH = os.path.join(STORAGE_PATH, "memories") 
+MEMORIES_PATH = os.path.join(STORAGE_PATH, "memories")
 MUSIC_FOLDER = os.path.join(STORAGE_PATH, "music")
-os.makedirs(ORIGINALS_PATH, exist_ok=True)
-os.makedirs(THUMBNAILS_PATH, exist_ok=True)
-os.makedirs(ORIGINALS_PATH, exist_ok=True)
-os.makedirs(THUMBNAILS_PATH, exist_ok=True)
-os.makedirs(MEMORIES_PATH, exist_ok=True)
-os.makedirs(MUSIC_FOLDER, exist_ok=True)
+
+METADATA_FILE = os.path.join(STORAGE_PATH, "metadata.json")
+SETTINGS_FILE = os.path.join(STORAGE_PATH, "settings.json")
+FRAMES_CONFIG_FILE = os.path.join(ASSETS_FOLDER, "frames_config.json")
+FONT_FILE = os.path.join(ASSETS_FOLDER, "Roboto-Regular.ttf")
+
+for path in [ORIGINALS_PATH, THUMBNAILS_PATH, MEMORIES_PATH, MUSIC_FOLDER, ASSETS_FOLDER]:
+    os.makedirs(path, exist_ok=True)
 
 # --- Налаштування AI ---
 HF_SPACE_CAPTION_URL = "bodyapromax2010/bodyasync-image-caption"
 OLLAMA_API_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL_NAME = "gemma3:1b"
+OLLAMA_MODEL_NAME = "gemma3:4b"
 HF_SPACE_COLLAGE_URL = "bodyapromax2010/black-forest-labs-FLUX.1-dev2"
 
 # --- Словник для відстеження асинхронних задач ---
 TASKS = {}
+try:
+    FONT = ImageFont.truetype(FONT_FILE, 30)
+except IOError:
+    FONT = ImageFont.load_default()
 
 # --- Функції для роботи з метаданими (без змін) ---
 # ... (load_metadata, save_metadata) ...
@@ -139,173 +157,299 @@ def get_raw_english_description(image_path):
     try:
         client = GradioClient(HF_SPACE_CAPTION_URL)
         result = client.predict(gradio_file(image_path), api_name="/predict")
+        print(result)
         return (result[0] if isinstance(result, (list, tuple)) else result).strip()
+        
     except Exception as e:
         print(f"   - ❌ Помилка аналізу на HF: {e}"); return None
 
 def create_warm_caption_from_description(english_description, date_info):
-    print(f"   - Крок Б: Генерую підпис...")
-    prompt_text = f"You are a creative assistant. Transform this technical description: '{english_description}' into a short, warm, nostalgic caption in Ukrainian, considering it was taken '{date_info}'. Write ONLY the final caption."
+    prompt_text = f"""
+    Ви створюєте підпис для спогаду. Ваше завдання — створити підпис для фотоспогадів. Він має бути довжиною 15-25 слів. Ви повинні створити його на основі технічного опису зображення. Технічний опис зображення — це все, що зображено на фотографії. Ви повинні зробити його текстом спогаду, але так, щоб була конкретика щодо того, що саме є в технічному описі зображення: теплий та ностальгічний підпис українською мовою.
+
+Використовуйте цю інформацію:
+- Технічний опис: "{english_description}"
+- Часовий контекст: "{date_info}"
+
+Зробіть так, щоб це звучало як теплий спогад (1 речення) 15-25 слів. Пишіть ТІЛЬКИ останній підпис українською мовою.
+
+Важливо:
+- Пишіть лише останній підпис українською мовою.
+- Не перекладайте сам опис.
+- Не додавайте жодних додаткових коментарів, приміток чи вітань.
+- Уникайте загальних фраз на кшталт "який гарний день". Будьте конкретними щодо змісту.
+- Якщо в описі згадується об'єкт (наприклад, графічний процесор, старий телефон, люди, кімната, будь-які речі або міська пам'ятка), зосередьте підпис на ньому з теплим особистим відтінком.
+- Якщо опис описує людей, тварин або місця, передайте атмосферу та емоції того моменту.
+- Викликає емоційність та ностальгію, ніби людина згадує саме цей момент або об'єкт.
+Використовуйте наступний опис фотографії: "{english_description}" та інформацію про дату "{date_info}". 
+    """
     payload = {"model": OLLAMA_MODEL_NAME, "prompt": prompt_text, "stream": False}
     try:
         response = requests.post(OLLAMA_API_URL, json=payload, timeout=60)
         response.raise_for_status()
-        return response.json().get("response", "").strip() or "Чудовий спогад!"
+        caption = response.json().get("response", "").strip().strip('"').strip("'")
+        return caption if caption else "Чудовий спогад!"
     except requests.exceptions.RequestException as e:
-        print(f"   - ❌ Помилка Ollama: {e}"); return None
-
-def is_good_memory(caption):
-    if not caption: return False
-    stop_words = ["screenshot", "text", "document", "chart", "diagram"]
-    return not any(word in caption.lower() for word in stop_words)
+        print(f"   - ❌ Помилка Ollama: {e}"); return "Помилка генерації підпису"
 
 # ... і решта твоїх функцій (я їх не буду повторювати) ...
 # Ми припускаємо, що всі твої функції для створення колажу тут присутні
 
 # <--- НОВЕ: Функція-заглушка для вибору музики
 def select_random_music():
-    """Вибирає випадковий трек з папки music."""
-    if not os.path.exists(MUSIC_FOLDER) or not os.listdir(MUSIC_FOLDER):
-        print("⚠️ Папка з музикою порожня або не існує.")
-        return None
-        
-    all_files_in_folder = os.listdir(MUSIC_FOLDER)
-    # <--- НОВИЙ РЯДОК ДЛЯ ДЕБАГУ
-    print(f"🔍 Знайдено в папці '{MUSIC_FOLDER}': {all_files_in_folder}")
-    
-    music_files = [f for f in all_files_in_folder if f.lower().endswith(('.mp3', '.wav', '.ogg', '.m4a'))] # Додав .m4a
-    
-    if not music_files:
-        print("❌ Не знайдено підходящих аудіофайлів (.mp3, .wav, .ogg, .m4a).")
-        return None
-        
-    chosen_file = random.choice(music_files)
-    print(f"🎵 Обрано музичний трек: {chosen_file}")
-    return chosen_file
+    """Вибирає випадковий трек, використовуючи абсолютний шлях."""
+    try:
+        music_folder_path = os.path.join(SCRIPT_DIR, MUSIC_FOLDER)
+        print(f"🔍 Шукаю музику в: '{music_folder_path}'")
+        if not os.path.exists(music_folder_path) or not os.listdir(music_folder_path):
+            print("⚠️ Папка з музикою порожня."); return None
+        music_files = [f for f in os.listdir(music_folder_path) if f.lower().endswith(('.mp3', '.wav', '.ogg', '.m4a'))]
+        if not music_files:
+            print("❌ Не знайдено підходящих аудіофайлів."); return None
+        chosen_file = random.choice(music_files)
+        print(f"🎵 Обрано музичний трек: {chosen_file}"); return chosen_file
+    except Exception as e:
+        print(f"🛑 Помилка пошуку музики: {e}"); return None
 
 def create_memory_story_worker(task_id: str):
-    """
-    Ця функція виконує всю важку роботу у фоні.
-    """
+    """Головний процес, що керує всім."""
     try:
         TASKS[task_id] = {"status": "processing", "message": "Selecting photos..."}
-        print(f"[{task_id}] Починаємо процес створення спогаду...")
-        
-        # --- ЕТАП 1: ВІДБІР ФОТОГРАФІЙ (ЦЕ МАЄ БУТИ ТУТ!) ---
         all_images = [f for f in os.listdir(ORIGINALS_PATH) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-        if len(all_images) < 2:
-            raise Exception("Потрібно мінімум 2 фотографії для роботи.")
-
+        if len(all_images) < 2: raise Exception("Потрібно мінімум 2 фотографії.")
+        
         num_to_find = random.randint(2, min(5, len(all_images)))
-        selected_memories, available_images = [], all_images.copy() # <--- ОСЬ ТУТ СТВОРЮЄТЬСЯ ЗМІННА
+        selected_memories, available_images = [], all_images.copy()
 
         while len(selected_memories) < num_to_find and available_images:
             image_name = random.choice(available_images)
             available_images.remove(image_name)
             image_path = os.path.join(ORIGINALS_PATH, image_name)
-            
-            # ... (твій код аналізу фото та генерації підписів) ...
             raw_description = get_raw_english_description(image_path)
             if raw_description and is_good_memory(raw_description):
                 date_info = f"зроблено {datetime.fromtimestamp(os.path.getmtime(image_path)).strftime('%d %B, %Y')}"
                 final_caption = create_warm_caption_from_description(raw_description, date_info)
                 if final_caption:
                     selected_memories.append({"filename": image_name, "caption": final_caption})
-        # --- КІНЕЦЬ ЕТАПУ ВІДБОРУ ---
 
-        if not selected_memories: # <--- Тепер ця перевірка спрацює коректно
-            raise Exception("Не вдалося знайти жодного підходящого фото.")
-            
+        if not selected_memories: raise Exception("Не вдалося знайти підходящі фото.")
         TASKS[task_id]["message"] = "Creating collage..."
-
-        # --- ЕТАП 2: Створення колажу ---
+        
         collage_filename = f"collage_{task_id}.png"
         collage_output_path = os.path.join(MEMORIES_PATH, collage_filename)
         
-        # Передаємо вже готовий список "Дизайнеру"
-        create_collage_and_save(selected_memories, collage_output_path)
+        # Викликаємо функцію, що створює колаж
+        collage_created = create_collage_and_save(selected_memories, collage_output_path)
+        if not collage_created:
+             # Можна обробити помилку, але поки просто продовжимо
+             print("⚠️ Створення колажу не вдалося, спогад буде без нього.")
 
-        # --- ЕТАП 3: Вибір музики та формування фінальної структури ---
         TASKS[task_id]["message"] = "Finalizing..."
         music_file = select_random_music()
         
-        story_items = []
-        for memory in selected_memories:
-            story_items.append({
-                "type": "image",
-                "imageUrl": f"/original/{memory['filename']}",
-                "caption": memory['caption'],
-            })
-            
-        story_items.append({
-            "type": "collage",
-            "imageUrl": f"/memories/{collage_filename}",
-            "caption": "Ваші найкращі моменти разом!",
-        })
+        story_items = [{"type": "image", "imageUrl": f"/original/{m['filename']}", "caption": m['caption']} for m in selected_memories]
+        if collage_created:
+            story_items.append({"type": "collage", "imageUrl": f"/memories/{collage_filename}", "caption": "Ваші найкращі моменти разом!"})
 
         final_result = {
             "id": task_id,
             "title": f"Спогад від {datetime.now().strftime('%d %B')}",
             "musicUrl": f"/music/{music_file}" if music_file else None,
             "items": story_items,
+            # Додаємо обкладинку для каруселі в Flutter
+            "coverImageUrl": f"/memories/{collage_filename}" if collage_created else f"/original/{selected_memories[0]['filename']}"
         }
-
+        
         result_filepath = os.path.join(MEMORIES_PATH, f"{task_id}.json")
-        with open(result_filepath, 'w', encoding='utf-8') as f:
-            json.dump(final_result, f, ensure_ascii=False, indent=2)
+        with open(result_filepath, 'w', encoding='utf-8') as f: json.dump(final_result, f, ensure_ascii=False, indent=2)
 
         TASKS[task_id] = {"status": "complete", "result": final_result}
         print(f"[{task_id}] ✅ Спогад успішно створено!")
 
     except Exception as e:
         print(f"[{task_id}] 🛑 Помилка під час генерації: {e}")
+        traceback.print_exc()
         TASKS[task_id] = {"status": "failed", "error": str(e)}
+
 
 # server.py
 
 # ... (всі твої імпорти та функції-хелпери) ...
-
-# <--- НОВА, ПРАВИЛЬНА ФУНКЦІЯ ДЛЯ СТВОРЕННЯ КОЛАЖУ
 # server.py
 
-def create_collage_and_save(selected_memories: list, output_path: str):
-    """
-    Приймає ВЖЕ ВІДІБРАНИЙ список фото і шлях для збереження.
-    """
-    print("🖼️ Починаємо створення колажу...")
-    
-    # <--- КЛЮЧОВЕ ВИПРАВЛЕННЯ: Додаємо try...except блок
+# ... (інші функції в цьому блоці) ...
+# def apply_frame(...): ...
+
+# <--- ВСТАВ ЦЕЙ БЛОК ПОВНІСТЮ
+# --- Повний набір функцій для генерації фону ---
+def get_prompt_filmstrip_abstraction(c): return (f"A minimalist abstract background, vintage 35mm filmstrip, soft gradients, {random.choice(c)} and pastel palette, light leaks, cinematic, fine grain, 8k.")
+def get_prompt_warm_retro_sky(c): return (f"A dreamy, retro-style abstract background, 70s sunset, warm {random.choice(c)} palette, smooth gradients, hazy clouds, sunburst effect, nostalgic film grain, ethereal, high resolution.")
+def get_prompt_futuristic_geometry(c): return (f"A modern, tech-style abstract background, clean layered dynamic curved and straight lines, monochrome base with sharp vibrant {random.choice(c)} accents, holographic elements, smooth highlights, minimalist vector art, Behance HD.")
+def get_prompt_soft_blobs(c): return (f"A serene minimalist organic background, large soft amorphous shapes like liquid ink bleeds, blended with smooth gradients in a soft {random.choice(c)} palette, subtle paper texture, bokeh effect, calm, high quality.")
+def get_prompt_brushstrokes(c): return (f"An artistic abstract background, modern canvas painting style, energetic broad textured brushstrokes, calligraphic linear patterns, harmonious {random.choice(c)} scheme, light canvas texture, balanced composition.")
+def get_prompt_symbolic_shapes(c): return (f"A clean modern graphic design background, soft gradient {random.choice(c)} base, simple icon-like vector shapes (thin circles, planet outlines), sparsely placed with gentle drop shadows, fine grain texture, rule of thirds.")
+def get_prompt_abstract_flowers(c): return (f"A soft pastel abstract background, delicate minimalist botanical illustrations, simple line-art flower silhouettes, smoothly blended {random.choice(c)} gradient, subtle grain, ethereal glow for depth.")
+def get_prompt_abstract_windows(c): return (f"A minimal architectural-style abstract background, layered framed square and rectangle shapes of varying opacities, on a smooth gradient {random.choice(c)} base, soft shadows, light grain, sharp highlights on edges.")
+def get_prompt_watercolor_texture(c): return (f"A beautiful watercolor-style abstract background, heavily blended textured brushstrokes in {random.choice(c)} palette, organic gradient transitions, visible high-quality paper grain, realistic water smudges, artistic.")
+def get_prompt_lines_and_splatters(c): return (f"A minimal abstract composition, modern art style, random organic ink splatters, irregular hand-drawn stripes, on a soft off-white paper texture, limited palette of black, gold, and one accent color (teal or rust), delicate grain.")
+
+BACKGROUND_STRATEGIES = [
+    get_prompt_filmstrip_abstraction, get_prompt_warm_retro_sky, get_prompt_futuristic_geometry, 
+    get_prompt_soft_blobs, get_prompt_brushstrokes, get_prompt_symbolic_shapes, 
+    get_prompt_abstract_flowers, get_prompt_abstract_windows, get_prompt_watercolor_texture, 
+    get_prompt_lines_and_splatters
+]
+# --- Кінець блоку функцій для фону ---
+
+# ... (далі йдуть інші твої функції, такі як generate_background_with_hf_space)
+def generate_background_with_hf_space(prompt):
+    print(f"🎨 Генеруємо фон для колажу...")
     try:
-        # --- СЮДИ ТИ ВСТАВЛЯЄШ ВСЮ СВОЮ ЛОГІКУ ГЕНЕРАЦІЇ КОЛАЖУ ---
-        # Наприклад:
-        # selected_filenames = [m['filename'] for m in selected_memories]
-        # dominant_colors = [get_dominant_color(...) for name in selected_filenames]
-        # prompt = chosen_strategy(dominant_colors)
-        # collage = generate_background_with_hf_space(prompt).convert("RGBA")
-        #
-        # ... (розміщення фото на фоні) ...
-        #
-        # collage.save(output_path)
-        # -----------------------------------------------------------------
+        client = GradioClient(HF_SPACE_COLLAGE_URL)
+        result = client.predict(prompt, "low quality, blurry, text, watermark, logo, ugly", api_name="/infer")
+        return Image.open(result[0]).resize((1080, 1920), Image.Resampling.LANCZOS)
+    except Exception as e:
+        print(f"🛑 Помилка генерації фону: {e}. Створюю запасний фон."); return Image.new("RGB", (1080, 1920), (128, 0, 128))
 
-        # --- ТИМЧАСОВА ЗАГЛУШКА ДЛЯ ПЕРЕВІРКИ ---
-        # Якщо ти хочеш швидко перевірити, розкоментуй цей блок,
-        # а свій код тимчасово закоментуй.
-        print("   - Створення заглушки колажу для тестування...")
-        placeholder_collage = Image.new("RGB", (1080, 1920), (random.randint(0,255), random.randint(0,255), random.randint(0,255)))
-        draw = ImageDraw.Draw(placeholder_collage)
-        draw.text((100, 100), f"Тестовий колаж\n{len(selected_memories)} фото", font=FONT, fill=(255,255,255))
-        placeholder_collage.save(output_path)
-        # --- КІНЕЦЬ ЗАГЛУШКИ ---
+def check_overlap(box1, box2, max_overlap_ratio=0.15):
+    inter_left, inter_top = max(box1[0], box2[0]), max(box1[1], box2[1])
+    inter_right, inter_bottom = min(box1[2], box2[2]), min(box1[3], box2[3])
+    if inter_right > inter_left and inter_bottom > inter_top:
+        inter_area = (inter_right - inter_left) * (inter_bottom - inter_top)
+        box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
+        if box1_area > 0 and inter_area / box1_area > max_overlap_ratio: return True
+    return False
+# <--- НОВА, ПРАВИЛЬНА ФУНКЦІЯ ДЛЯ СТВОРЕННЯ КОЛАЖУ
+# server.py
+def apply_frame(photo, frame_path, config):
+    try:
+        frame_template = Image.open(frame_path).convert("RGBA")
+        params = config.get(os.path.basename(frame_path), {})
+        scale = params.get("scale", 1.0)
+        scale_x, scale_y = params.get("scale_x"), params.get("scale_y")
+        if scale_x is not None and scale_y is not None: new_frame_width, new_frame_height = int(photo.width * scale_x), int(photo.height * scale_y)
+        else: new_frame_width, new_frame_height = int(photo.width * scale), int(photo.height * scale)
+        resized_frame = frame_template.resize((new_frame_width, new_frame_height), Image.Resampling.LANCZOS)
+        result_canvas = Image.new("RGBA", resized_frame.size, (0, 0, 0, 0)) 
+        photo_pos_x = (resized_frame.width - photo.width) // 2 + params.get("offset_x", 0)
+        photo_pos_y = (resized_frame.height - photo.height) // 2 + params.get("offset_y", 0)
+        result_canvas.paste(photo, (photo_pos_x, photo_pos_y))
+        result_canvas.paste(resized_frame, (0, 0), resized_frame)
+        return result_canvas
+    except Exception as e:
+        print(f"⚠️ Помилка рамки: {e}"); return photo
+def is_good_memory(caption):
+    if not caption: return False
+    stop_words = ["screenshot", "text", "document", "chart", "diagram", "interface", "code"]
+    return not any(word in caption.lower() for word in stop_words)
 
+
+def get_dominant_color(image_path):
+    img = Image.open(image_path).resize((1, 1), Image.Resampling.LANCZOS)
+    return f"#{img.getpixel((0, 0))[0]:02x}{img.getpixel((0, 0))[1]:02x}{img.getpixel((0, 0))[2]:02x}"
+
+
+
+
+# server.py
+
+# ... (інші функції в цьому блоці) ...
+# def apply_frame(...): ...
+
+# <--- ВСТАВ ЦЕЙ БЛОК ПОВНІСТЮ
+# --- Повний набір функцій для генерації фону ---
+def get_prompt_filmstrip_abstraction(c): return (f"A minimalist abstract background, vintage 35mm filmstrip, soft gradients, {random.choice(c)} and pastel palette, light leaks, cinematic, fine grain, 8k.")
+def get_prompt_warm_retro_sky(c): return (f"A dreamy, retro-style abstract background, 70s sunset, warm {random.choice(c)} palette, smooth gradients, hazy clouds, sunburst effect, nostalgic film grain, ethereal, high resolution.")
+def get_prompt_futuristic_geometry(c): return (f"A modern, tech-style abstract background, clean layered dynamic curved and straight lines, monochrome base with sharp vibrant {random.choice(c)} accents, holographic elements, smooth highlights, minimalist vector art, Behance HD.")
+def get_prompt_soft_blobs(c): return (f"A serene minimalist organic background, large soft amorphous shapes like liquid ink bleeds, blended with smooth gradients in a soft {random.choice(c)} palette, subtle paper texture, bokeh effect, calm, high quality.")
+def get_prompt_brushstrokes(c): return (f"An artistic abstract background, modern canvas painting style, energetic broad textured brushstrokes, calligraphic linear patterns, harmonious {random.choice(c)} scheme, light canvas texture, balanced composition.")
+def get_prompt_symbolic_shapes(c): return (f"A clean modern graphic design background, soft gradient {random.choice(c)} base, simple icon-like vector shapes (thin circles, planet outlines), sparsely placed with gentle drop shadows, fine grain texture, rule of thirds.")
+def get_prompt_abstract_flowers(c): return (f"A soft pastel abstract background, delicate minimalist botanical illustrations, simple line-art flower silhouettes, smoothly blended {random.choice(c)} gradient, subtle grain, ethereal glow for depth.")
+def get_prompt_abstract_windows(c): return (f"A minimal architectural-style abstract background, layered framed square and rectangle shapes of varying opacities, on a smooth gradient {random.choice(c)} base, soft shadows, light grain, sharp highlights on edges.")
+def get_prompt_watercolor_texture(c): return (f"A beautiful watercolor-style abstract background, heavily blended textured brushstrokes in {random.choice(c)} palette, organic gradient transitions, visible high-quality paper grain, realistic water smudges, artistic.")
+def get_prompt_lines_and_splatters(c): return (f"A minimal abstract composition, modern art style, random organic ink splatters, irregular hand-drawn stripes, on a soft off-white paper texture, limited palette of black, gold, and one accent color (teal or rust), delicate grain.")
+
+BACKGROUND_STRATEGIES = [
+    get_prompt_filmstrip_abstraction, get_prompt_warm_retro_sky, get_prompt_futuristic_geometry, 
+    get_prompt_soft_blobs, get_prompt_brushstrokes, get_prompt_symbolic_shapes, 
+    get_prompt_abstract_flowers, get_prompt_abstract_windows, get_prompt_watercolor_texture, 
+    get_prompt_lines_and_splatters
+]
+# --- Кінець блоку функцій для фону ---
+
+# ... (далі йдуть інші твої функції, такі як generate_background_with_hf_space)
+
+
+
+def create_collage_and_save(selected_memories: list, output_path: str):
+    """Приймає ВЖЕ ВІДІБРАНИЙ список фото і шлях для збереження."""
+    print("🖼️ Починаємо створення колажу...")
+    try:
+        selected_filenames = [m['filename'] for m in selected_memories]
+        
+        # <--- КЛЮЧОВЕ ВИПРАВЛЕННЯ: Використовуємо твою логіку
+        # 1. Отримуємо домінантні кольори з фото
+        print("   - Аналізуємо домінантні кольори...")
+        dominant_colors = [get_dominant_color(os.path.join(ORIGINALS_PATH, name)) for name in selected_filenames]
+        
+        # 2. Випадковим чином обираємо ОДНУ З ТВОЇХ функцій-стратегій
+        print("   - Вибираємо стратегію для фону...")
+        chosen_strategy = random.choice(BACKGROUND_STRATEGIES)
+        
+        # 3. Викликаємо обрану функцію, передаючи їй кольори, щоб отримати унікальний промпт
+        prompt = chosen_strategy(dominant_colors)
+        print(f"   - Згенеровано промпт для фону: \"{prompt[:80]}...\"")
+        
+        # 4. Генеруємо фон за цим промптом
+        collage = generate_background_with_hf_space(prompt).convert("RGBA")
+        
+        # --- Решта твого коду для розміщення фото, рамок і т.д. залишається тут ---
+        frames_folder = os.path.join(ASSETS_FOLDER, "frames")
+        frames_config = {}
+        if os.path.exists(FRAMES_CONFIG_FILE):
+             with open(FRAMES_CONFIG_FILE, 'r') as f: frames_config = json.load(f)
+
+        chosen_frame_path = None
+        if os.path.exists(frames_folder):
+            frame_files = [f for f in os.listdir(frames_folder) if f.lower().endswith('.png') and f in frames_config]
+            if frame_files: chosen_frame_path = os.path.join(frames_folder, random.choice(frame_files))
+
+        PHOTO_SIZES_BY_COUNT = {2: 800, 3: 650, 4: 550, 5: 480}
+        target_size = PHOTO_SIZES_BY_COUNT.get(len(selected_filenames), 600)
+        
+        placed_boxes = []
+        for filename in selected_filenames:
+            photo_path = os.path.join(ORIGINALS_PATH, filename)
+            if not os.path.exists(photo_path):
+                print(f"⚠️ Фото {filename} не знайдено, пропускаємо.")
+                continue
+
+            photo = Image.open(photo_path).convert("RGBA")
+            photo.thumbnail((target_size, target_size), Image.Resampling.LANCZOS)
+            
+            photo_with_frame = apply_frame(photo, chosen_frame_path, frames_config) if chosen_frame_path else photo
+            rotated_photo = photo_with_frame.rotate(random.randint(-20, 20), expand=True, resample=Image.BICUBIC)
+            
+            is_placed = False
+            for _ in range(500):
+                margin = 30 
+                x = random.randint(margin, collage.width - rotated_photo.width - margin)
+                y = random.randint(margin, collage.height - rotated_photo.height - margin)
+                new_box = (x, y, x + rotated_photo.width, y + rotated_photo.height)
+                if not any(check_overlap(new_box, box) for box in placed_boxes):
+                    placed_boxes.append(new_box)
+                    collage.paste(rotated_photo, (x, y), rotated_photo)
+                    is_placed = True
+                    break
+            if not is_placed: print(f"⚠️ Не вдалося знайти місце для {filename}")
+
+        collage.save(output_path)
         print(f"✅ Колаж успішно збережено у: {output_path}")
         return True
-    
+
     except Exception as e:
-        # Якщо щось пішло не так, ми побачимо детальну помилку в логах
-        print(f"🛑🛑🛑 КРИТИЧНА ПОМИЛКА під час створення колажу: {e}")
-        # Створюємо порожній файл, щоб уникнути помилки 404, але в додатку буде видно, що щось не так
-        Image.new("RGB", (100, 100), (0,0,0)).save(output_path)
+        print(f"🛑🛑🛑 КРИТИЧНА ПОМИЛКА під час створення колажу!")
+        traceback.print_exc()
         return False
 # ... (решта твоїх функцій, напр. select_random_music)
 
@@ -422,51 +566,38 @@ async def upload_file_to_path(file: UploadFile = File(...), path: str = Form("")
 
 @app.post("/memories/generate")
 async def generate_memory_story(background_tasks: BackgroundTasks):
-    """Запускає асинхронну задачу генерації спогаду."""
     task_id = str(uuid.uuid4())
-    TASKS[task_id] = {"status": "starting", "message": "Task received."}
-    # Використовуємо BackgroundTasks від FastAPI для запуску у фоні
+    TASKS[task_id] = {"status": "starting"}
     background_tasks.add_task(create_memory_story_worker, task_id)
     return {"task_id": task_id}
 
-
 @app.get("/memories/status/{task_id}")
 async def get_memory_status(task_id: str):
-    """Перевіряє статус задачі генерації."""
     task = TASKS.get(task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+    if not task: raise HTTPException(status_code=404, detail="Task not found")
     return task
 
 @app.get("/memories/")
 async def get_all_memories():
-    """Повертає список усіх раніше згенерованих спогадів."""
-    memory_files = [f for f in os.listdir(MEMORIES_PATH) if f.endswith('.json')]
+    memory_files = sorted([f for f in os.listdir(MEMORIES_PATH) if f.endswith('.json')], reverse=True)
     all_memories = []
     for filename in memory_files:
         try:
-            with open(os.path.join(MEMORIES_PATH, filename), 'r', encoding='utf-8') as f:
-                all_memories.append(json.load(f))
-        except:
-            continue
-    # Сортуємо від новіших до старіших, припускаючи, що ID (uuid) має час
-    all_memories.sort(key=lambda x: x.get('id'), reverse=True)
+            with open(os.path.join(MEMORIES_PATH, filename), 'r', encoding='utf-8') as f: all_memories.append(json.load(f))
+        except: continue
     return all_memories
 
-# Ендпоінт для доступу до колажів та музики
 @app.get("/memories/{filename}")
 async def get_memory_asset(filename: str):
     file_path = os.path.join(MEMORIES_PATH, filename)
-    if os.path.exists(file_path):
-        return FileResponse(file_path)
-    raise HTTPException(status_code=404, detail="Memory asset not found")
+    if os.path.exists(file_path): return FileResponse(file_path)
+    raise HTTPException(status_code=404, detail="Asset not found")
 
 @app.get("/music/{filename}")
 async def get_music_asset(filename: str):
     file_path = os.path.join(MUSIC_FOLDER, filename)
-    if os.path.exists(file_path):
-        return FileResponse(file_path)
-    raise HTTPException(status_code=404, detail="Music asset not found")
+    if os.path.exists(file_path): return FileResponse(file_path)
+    raise HTTPException(status_code=404, detail="Asset not found")
 
 
 @app.post("/upload/")

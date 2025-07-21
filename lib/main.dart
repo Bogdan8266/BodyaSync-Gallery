@@ -30,6 +30,7 @@ import 'package:rive/rive.dart' as rive;
 import 'package:shape_of_view_null_safe/shape_of_view_null_safe.dart';
 import 'package:smooth_page_indicator/smooth_page_indicator.dart';
 import 'package:flutter_sticky_header/flutter_sticky_header.dart';
+import 'package:flutter_staggered_grid_view/flutter_staggered_grid_view.dart';
 
 // ===============================================================
 // ГЛОБАЛЬНІ ЗМІННІ ТА КОНФІГУРАЦІЯ
@@ -64,7 +65,33 @@ class GalleryItem {
   }
 }
 
+abstract class LayoutItem {
+  final double timestamp;
+  LayoutItem(this.timestamp);
+}
 
+class SinglePhotoItem extends LayoutItem {
+  final GalleryItem item;
+  SinglePhotoItem(double timestamp, this.item) : super(timestamp);
+
+  factory SinglePhotoItem.fromJson(Map<String, dynamic> json) {
+    return SinglePhotoItem(
+      json['timestamp'],
+      GalleryItem.fromJson(json['item']),
+    );
+  }
+}
+
+class GroupPhotoItem extends LayoutItem {
+  final List<GalleryItem> items;
+  GroupPhotoItem(double timestamp, this.items) : super(timestamp);
+  
+  factory GroupPhotoItem.fromJson(Map<String, dynamic> json) {
+    var itemsFromJson = json['items'] as List;
+    List<GalleryItem> galleryItems = itemsFromJson.map((i) => GalleryItem.fromJson(i)).toList();
+    return GroupPhotoItem(json['timestamp'], galleryItems);
+  }
+}
 class FileSystemItem {
   final String name;
   final String type; // 'directory' або 'file'
@@ -145,7 +172,26 @@ class ApiService {
     }
   }
 
+// main.dart -> ApiService
 
+Future<List<LayoutItem>> fetchGroupedGallery() async {
+  final baseUrl = await getBaseUrl();
+  if (baseUrl.isEmpty) throw Exception('IP не налаштовано.');
+  
+  final response = await http.get(Uri.parse('$baseUrl/gallery/grouped/'));
+  if (response.statusCode == 200) {
+    final List<dynamic> data = json.decode(utf8.decode(response.bodyBytes));
+    return data.map((itemJson) {
+      if (itemJson['type'] == 'group') {
+        return GroupPhotoItem.fromJson(itemJson);
+      } else {
+        return SinglePhotoItem.fromJson(itemJson);
+      }
+    }).toList();
+  } else {
+    throw Exception('Failed to load grouped gallery');
+  }
+}
 Future<List<MemoryStory>> fetchMemoryStories() async {
     final baseUrl = await getBaseUrl();
     if (baseUrl.isEmpty) return [];
@@ -718,8 +764,9 @@ class MemoryStory {
   final String title;
   final String? musicUrl;
   final List<StoryItem> items;
+  final String coverImageUrl; // <--- ДОДАЙ ЦЕ ПОЛЕ
 
-  MemoryStory({required this.id, required this.title, this.musicUrl, required this.items});
+  MemoryStory({required this.id, required this.title, this.musicUrl, required this.items, required this.coverImageUrl}); // <--- І СЮДИ
 
   factory MemoryStory.fromJson(Map<String, dynamic> json) {
     var itemsFromJson = json['items'] as List;
@@ -729,88 +776,93 @@ class MemoryStory {
       title: json['title'],
       musicUrl: json['musicUrl'],
       items: storyItems,
+      // <--- І СЮДИ
+      coverImageUrl: json['coverImageUrl'] ?? (storyItems.isNotEmpty ? storyItems.last.imageUrl : ''),
     );
   }
-  
-  // Обкладинка для каруселі - це завжди останній елемент (колаж)
-  String get coverImageUrl => items.last.imageUrl;
 }
 
-class _GalleryScreenState extends State<GalleryScreen> {
-  late Future<List<GalleryItem>> _galleryItemsFuture;
-  late final PageController _memoriesPageController;
-late Future<List<MemoryStory>> _memoriesFuture;
-bool _isGenerating = false;
-  //final List<MemoryItem> _dummyMemories = [
-   // MemoryItem(label: 'Подорож до Карпат', date: '11 липня 2023', imageUrl: 'https://images.unsplash.com/photo-1611427020646-f6fa07820d14?q=80&w=800'),
-    //MemoryItem(label: 'Вихідні на морі', date: '20 серпня 2023', imageUrl: 'https://images.unsplash.com/photo-1505118380757-91f5f5632de0?q=80&w=800'),
-  //  MemoryItem(label: 'Осінній ліс', date: '15 жовтня 2023', imageUrl: 'https://images.unsplash.com/photo-1447752875215-b2761acb3c5d?w=800'),
-  //  MemoryItem(label: 'Новий Рік', date: '31 грудня 2023', imageUrl: 'https://images.unsplash.com/photo-1573690706484-86f444f0b940?q=80&w=800'),
- // ];
+// main.dart
 
+// ДОДАЙ ЦЕЙ МАЛЕНЬКИЙ КЛАС ПОЗА МЕЖАМИ ІНШИХ КЛАСІВ
+// Допоміжний клас для зберігання розміру плитки
+class TileSize {
+  final int crossAxis; // Ширина (1 або 2)
+  final int mainAxis;  // Висота (1 або 2)
+  TileSize(this.crossAxis, this.mainAxis);
+}
+
+
+// --- ПОЧАТОК КЛАСУ _GalleryScreenState ---
+// Заміни свій старий клас на цей
+class _GalleryScreenState extends State<GalleryScreen> {
+  // --- Змінні стану та кеш (без змін) ---
+  late Future<List<GalleryItem>> _galleryItemsFuture;
+  late Future<List<MemoryStory>> _memoriesFuture;
+  late final PageController _memoriesPageController;
+  final Map<DateTime, List<TileSize>> _layoutCache = {};
+  bool _isGenerating = false;
+
+  // --- Життєвий цикл та оновлення даних (без змін) ---
   @override
   void initState() {
     super.initState();
-    _refreshGallery();
     _memoriesPageController = PageController(viewportFraction: 0.88);
-    _refreshMemories();
+    _refreshAll();
   }
-Future<void> _refreshMemories() async {
-    if (mounted) {
-      setState(() {
-        _memoriesFuture = apiService.fetchMemoryStories();
-      });
-    }
-  }
-
-
-Future<void> _generateNewMemory() async {
-    setState(() => _isGenerating = true);
-    
-    try {
-      final taskId = await apiService.startMemoryGeneration();
-      
-      // Починаємо опитування
-      Timer.periodic(const Duration(seconds: 3), (timer) async {
-        if (!mounted) {
-          timer.cancel();
-          return;
-        }
-        
-        final status = await apiService.checkGenerationStatus(taskId);
-        if (status['status'] == 'complete') {
-          timer.cancel();
-          setState(() => _isGenerating = false);
-          _refreshMemories(); // Оновлюємо список, щоб побачити новий спогад
-        } else if (status['status'] == 'failed') {
-          timer.cancel();
-          setState(() => _isGenerating = false);
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Помилка генерації: ${status['error']}')));
-        }
-        // Якщо 'processing', то нічого не робимо, просто чекаємо наступного разу
-      });
-      
-    } catch(e) {
-      setState(() => _isGenerating = false);
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Не вдалося запустити генерацію: $e')));
-    }
-  }
-
 
   @override
   void dispose() {
     _memoriesPageController.dispose();
     super.dispose();
   }
-  
+
+  void _refreshAll() {
+    _refreshGallery();
+    _refreshMemories();
+  }
+
   Future<void> _refreshGallery() async {
     if (mounted) {
-      setState(() {
-        _galleryItemsFuture = apiService.fetchGalleryItems();
-      });
+      _layoutCache.clear();
+      setState(() { _galleryItemsFuture = apiService.fetchGalleryItems(); });
     }
   }
 
+  Future<void> _refreshMemories() async {
+    if (mounted) {
+      setState(() { _memoriesFuture = apiService.fetchMemoryStories(); });
+    }
+  }
+
+  // --- Логіка генерації спогадів ---
+  Future<void> _generateNewMemory() async {
+    setState(() => _isGenerating = true);
+    try {
+      final taskId = await apiService.startMemoryGeneration();
+      Timer.periodic(const Duration(seconds: 3), (timer) async {
+        if (!mounted) {
+          timer.cancel();
+          return;
+        }
+        final status = await apiService.checkGenerationStatus(taskId);
+        if (status['status'] == 'complete') {
+          timer.cancel();
+          setState(() => _isGenerating = false);
+          _refreshMemories();
+        } else if (status['status'] == 'failed') {
+          timer.cancel();
+          setState(() => _isGenerating = false);
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Помилка генерації: ${status['error']}')));
+        }
+      });
+    } catch(e) {
+      setState(() => _isGenerating = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Не вдалося запустити генерацію: $e')));
+    }
+  }
+
+  // --- Хелпери ---
   Map<DateTime, List<GalleryItem>> _groupItemsByDate(List<GalleryItem> items) {
     final Map<DateTime, List<GalleryItem>> groupedItems = {};
     for (var item in items) {
@@ -820,194 +872,221 @@ Future<void> _generateNewMemory() async {
     }
     return groupedItems;
   }
-  
+
+  // --- Алгоритм Masonry Grid ---
+  List<TileSize> _generateLayout(int photoCount, DateTime dateKey) {
+    if (_layoutCache.containsKey(dateKey)) {
+      return _layoutCache[dateKey]!;
+    }
+    
+    final List<TileSize> layout = [];
+    final random = Random(dateKey.millisecondsSinceEpoch);
+    final grid = List.generate(100, (_) => List.filled(4, false));
+
+    // Базові імовірності
+    final basePatterns = [
+      {'size': TileSize(2, 2), 'weight': 5, 'name': '2x2'},
+       {'size': TileSize(1, 2), 'weight': 15, 'name': '1x2'},
+       {'size': TileSize(2, 1), 'weight': 20, 'name': '2x1'},
+       {'size': TileSize(1, 1), 'weight': 60, 'name': '1x1'},
+    ];
+
+    for (int i = 0; i < photoCount; i++) {
+      // 1. Знаходимо першу вільну клітинку
+      int startX = 0, startY = 0;
+      bool cellFound = false;
+      for (int y = 0; y < grid.length; y++) {
+        for (int x = 0; x < 4; x++) {
+          if (!grid[y][x]) {
+            startY = y; startX = x;
+            cellFound = true; break;
+          }
+        }
+        if (cellFound) break;
+      }
+      if (!cellFound) { layout.add(TileSize(1, 1)); continue; }
+
+      // 2. Створюємо ДИНАМІЧНІ ваги залежно від позиції
+      // `progress` = 0.0 нагорі, 1.0 внизу (умовно на 15-й лінії)
+      double progress = (startY / 15.0).clamp(0.0, 1.0);
+
+      List<Map<String, Object>> dynamicPatterns = basePatterns.map((p) {
+        final baseWeight = p['weight'] as int;
+        final name = p['name'] as String;
+        double newWeight = baseWeight.toDouble();
+
+        if (name == '2x2') { // Імовірність 2x2 зменшується донизу
+          newWeight *= (1.2 - progress);
+        }
+        if (name == '1x1') { // Імовірність 1x1 збільшується донизу
+          newWeight *= (1.0 + progress);
+        }
+        return {'size': p['size'] as TileSize, 'weight': newWeight.toInt().clamp(0, 200), 'name': name};
+      }).toList();
+
+
+      // 3. Вибираємо патерн з урахуванням нових ваг та правил
+      TileSize chosenSize = TileSize(1, 1);
+      final totalWeight = dynamicPatterns.fold<int>(0, (sum, item) => sum + (item['weight'] as int));
+      
+      if (totalWeight > 0) {
+        int randomWeight = random.nextInt(totalWeight);
+        
+        // ВИПРАВЛЕННЯ: Ітерація по списку без shuffle для правильної роботи ваги
+        for (var pattern in dynamicPatterns) {
+          final currentWeight = pattern['weight'] as int;
+          if (randomWeight < currentWeight) {
+            final size = pattern['size'] as TileSize;
+
+            // --- ЗАСТОСОВУЄМО ТВОЇ НОВІ ПРАВИЛА ---
+            // Правило 1: 2x1 та 2x2 тільки по краях
+            if (size.crossAxis == 2 && !(startX == 0 || startX == 2)) {
+              continue; // Пропускаємо цей варіант, він не підходить по позиції
+            }
+            // Правило 2: 1x2 не може бути на перших двох лініях
+            if (size.mainAxis == 2 && size.crossAxis == 1 && startY < 2) {
+              continue; // Пропускаємо, занадто високо
+            }
+            
+            // Перевіряємо, чи є вільне місце для цього розміру
+            bool canPlace = true;
+            if (startX + size.crossAxis > 4) {
+              canPlace = false;
+            } else {
+              for (int y = 0; y < size.mainAxis; y++) {
+                for (int x = 0; x < size.crossAxis; x++) {
+                  if (startY + y >= grid.length || grid[startY + y][startX + x]) {
+                    canPlace = false; break;
+                  }
+                }
+                if (!canPlace) break;
+              }
+            }
+            if (canPlace) { chosenSize = size; break; }
+          }
+          randomWeight -= currentWeight;
+        }
+      }
+
+      // 4. Додаємо обрану плитку в розкладку
+      layout.add(chosenSize);
+      for (int y = 0; y < chosenSize.mainAxis; y++) {
+        for (int x = 0; x < chosenSize.crossAxis; x++) {
+          if (startY + y < grid.length) grid[startY + y][startX + x] = true;
+        }
+      }
+    }
+    _layoutCache[dateKey] = layout;
+    return layout;
+  }
+
+  // --- Віджети ---
   Widget _buildMemoriesCarousel() {
-  return FutureBuilder<List<MemoryStory>>(
-    // 1. Використовуємо FutureBuilder для асинхронного завантаження списку спогадів
-    future: _memoriesFuture,
-    builder: (context, snapshot) {
-      // Поки дані завантажуються, показуємо індикатор
-      if (snapshot.connectionState == ConnectionState.waiting) {
-        return const SizedBox(height: 220, child: Center(child: CircularProgressIndicator()));
-      }
+    return FutureBuilder<List<MemoryStory>>(
+      future: _memoriesFuture,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const SizedBox(height: 250, child: Center(child: CircularProgressIndicator()));
+        }
+        if (snapshot.hasError) {
+          return SizedBox(height: 250, child: Center(child: Text('Помилка завантаження спогадів')));
+        }
+        final memories = snapshot.data ?? [];
 
-      // Якщо сталася помилка
-      if (snapshot.hasError) {
-        return SizedBox(height: 220, child: Center(child: Text('Помилка завантаження спогадів: ${snapshot.error}')));
-      }
-
-      // Отримуємо список спогадів
-      final memories = snapshot.data ?? [];
-
-      // 2. Будуємо основний віджет, що містить заголовок, кнопку та саму карусель
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // 3. Заголовок "Спогади" та кнопка "Створити новий"
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text('Спогади', style: Theme.of(context).textTheme.titleLarge),
-                // Показуємо або індикатор завантаження, або кнопку
-                _isGenerating
-                    ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 3))
-                    : IconButton(
-                        icon: const Icon(Icons.add_circle_outline),
-                        onPressed: _generateNewMemory,
-                        tooltip: 'Створити новий спогад',
-                      )
-              ],
-            ),
-          ),
-
-          // 4. Якщо спогадів немає, показуємо інформативне повідомлення
-          if (memories.isEmpty)
-            SizedBox(
-              height: 180,
-              child: Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Text(
-                    'У вас ще немає спогадів. Спробуйте створити новий!',
-                    textAlign: TextAlign.center,
-                    style: Theme.of(context).textTheme.bodyLarge,
-                  ),
-                ),
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text('Спогади', style: Theme.of(context).textTheme.titleLarge),
+                  _isGenerating 
+                    ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 3)) 
+                    : IconButton(icon: const Icon(Icons.add_circle_outline), onPressed: _generateNewMemory, tooltip: 'Створити новий спогад')
+                ],
               ),
-            )
-          // 5. Інакше, показуємо карусель
-          else
-            SizedBox(
-              height: 220,
-              child: PageView.builder(
-                controller: _memoriesPageController,
-                itemCount: memories.length,
-                itemBuilder: (context, index) {
-                  final memory = memories[index];
-                  // Кожна картка - це окремий віджет, на який можна натиснути
-                  return GestureDetector(
-                    onTap: () {
-                      // При натисканні відкриваємо новий екран StoryViewerScreen
-                      Navigator.of(context).push(
-                        MaterialPageRoute(builder: (_) => StoryViewerScreen(story: memory)),
-                      );
-                    },
-                    child: AnimatedBuilder(
-                      animation: _memoriesPageController,
-                      builder: (context, child) {
-                        // Анімація для зміни розміру неактивних карток
-                        double pageOffset = 0;
-                        if (_memoriesPageController.position.haveDimensions) {
-                          pageOffset = (_memoriesPageController.page ?? 0) - index;
-                        }
-                        return Transform.scale(
-                          scale: (1 - (pageOffset.abs() * 0.1)).clamp(0.9, 1.0),
-                          child: child,
-                        );
-                      },
-                      child: Card(
-                        elevation: 2,
-                        margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-                        clipBehavior: Clip.antiAlias,
-                        child: Stack(
-                          fit: StackFit.expand,
-                          children: [
-                            // Фон з картинкою (колажем) та ефектом паралаксу
-                            FutureBuilder<String>(
-                              future: apiService.getBaseUrl(),
-                              builder: (context, urlSnapshot) {
-                                if (!urlSnapshot.hasData || urlSnapshot.data!.isEmpty) return const SizedBox.shrink();
-                                final imageUrl = urlSnapshot.data! + memory.coverImageUrl;
-                                
-                                return AnimatedBuilder(
-                                  animation: _memoriesPageController,
-                                  builder: (context, child) {
-                                    double pageOffset = 0;
-                                    if (_memoriesPageController.position.haveDimensions) {
-                                      pageOffset = (_memoriesPageController.page ?? 0) - index;
-                                    }
-                                    // Рухаємо фон в протилежному напрямку для ефекту паралаксу
-                                    return Transform.translate(
-                                      offset: Offset(-pageOffset * 50, 0),
-                                      child: child,
-                                    );
-                                  },
-                                  child: CachedNetworkImage(
-                                    imageUrl: imageUrl,
-                                    fit: BoxFit.cover,
-                                    placeholder: (c, u) => Container(color: Colors.grey.shade300),
-                                    errorWidget: (c, u, e) => const Icon(Icons.error),
-                                  ),
-                                );
-                              }
-                            ),
-                            // Градієнт для кращої читабельності тексту
-                            const DecoratedBox(
-                              decoration: BoxDecoration(
-                                gradient: LinearGradient(
-                                  begin: Alignment.topCenter,
-                                  end: Alignment.bottomCenter,
-                                  colors: [Colors.transparent, Colors.black87],
-                                  stops: [0.5, 1.0],
-                                ),
+            ),
+            if (memories.isEmpty)
+              SizedBox(height: 180, child: Center(child: Padding(padding: const EdgeInsets.all(16.0), child: Text('Спробуйте створити новий спогад!', textAlign: TextAlign.center, style: Theme.of(context).textTheme.bodyLarge))))
+            else
+              SizedBox(
+                height: 220,
+                child: PageView.builder(
+                  controller: _memoriesPageController,
+                  itemCount: memories.length,
+                  itemBuilder: (context, index) {
+                    final memory = memories[index];
+                    return GestureDetector(
+                      onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => StoryViewerScreen(story: memory))),
+                      child: AnimatedBuilder(
+                        animation: _memoriesPageController,
+                        builder: (context, child) {
+                          double pageOffset = 0;
+                          if (_memoriesPageController.position.haveDimensions) pageOffset = (_memoriesPageController.page ?? 0) - index;
+                          return Transform.scale(scale: (1 - (pageOffset.abs() * 0.1)).clamp(0.9, 1.0), child: child);
+                        },
+                        child: Card(
+                          elevation: 2, margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                          clipBehavior: Clip.antiAlias,
+                          child: Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              FutureBuilder<String>(
+                                future: apiService.getBaseUrl(),
+                                builder: (context, urlSnapshot) {
+                                  if (!urlSnapshot.hasData || urlSnapshot.data!.isEmpty) return Container(color: Colors.grey.shade800);
+                                  final fullImageUrl = urlSnapshot.data! + memory.coverImageUrl;
+                                  return CachedNetworkImage(
+                                    imageUrl: fullImageUrl, fit: BoxFit.cover,
+                                    placeholder: (c, u) => Container(color: Colors.grey.shade800, child: const Center(child: CircularProgressIndicator(color: Colors.white24))),
+                                    errorWidget: (c, u, e) => Container(color: Colors.grey.shade800, child: const Center(child: Icon(Icons.error_outline, color: Colors.white38, size: 40))),
+                                  );
+                                }
                               ),
-                            ),
-                            // Текст (заголовок спогаду)
-                            Positioned(
-                              bottom: 16,
-                              left: 16,
-                              right: 16,
-                              child: Text(
-                                memory.title,
-                                style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.bold,
-                                  shadows: [const Shadow(blurRadius: 4)]
-                                ),
+                              DecoratedBox(decoration: BoxDecoration(gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Colors.transparent, Colors.black.withOpacity(0.6)], stops: const [0.5, 1.0]))),
+                              Positioned(
+                                bottom: 16, left: 16, right: 16,
+                                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                  Text(memory.title, style: Theme.of(context).textTheme.titleLarge?.copyWith(color: Colors.white, fontWeight: FontWeight.bold)),
+                                ]),
                               ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
                       ),
-                    ),
-                  );
-                },
+                    );
+                  },
+                ),
               ),
-            ),
-          
-          // 6. Індикатори-крапки під каруселлю (з'являються, тільки якщо є спогади)
-          if (memories.isNotEmpty)
-            Center(
-              child: Padding(
-                padding: const EdgeInsets.only(top: 8.0, bottom: 8.0),
-                child: SmoothPageIndicator(
-                  controller: _memoriesPageController,
-                  count: memories.length,
-                  effect: WormEffect(
-                    dotHeight: 8,
-                    dotWidth: 8,
-                    activeDotColor: Theme.of(context).colorScheme.primary,
-                    dotColor: Theme.of(context).colorScheme.onSurface.withOpacity(0.2),
+            if (memories.isNotEmpty)
+              Center(
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 8.0, bottom: 8.0),
+                  child: SmoothPageIndicator(
+                    controller: _memoriesPageController,
+                    count: memories.length,
+                    effect: WormEffect(dotHeight: 8, dotWidth: 8, activeDotColor: Theme.of(context).colorScheme.primary, dotColor: Theme.of(context).colorScheme.secondaryContainer),
                   ),
                 ),
               ),
-            ),
-        ],
-      );
-    },
-  );
-}
+          ],
+        );
+      },
+    );
+  }
 
-
+  // --- Головний метод build ---
   @override
-  Widget build(BuildContext context) {
-    return FutureBuilder<List<GalleryItem>>(
+Widget build(BuildContext context) {
+  return RefreshIndicator(
+    onRefresh: () async => _refreshAll(),
+    child: FutureBuilder<List<GalleryItem>>(
       future: _galleryItemsFuture,
       builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.none || snapshot.connectionState == ConnectionState.waiting) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
           return const Center(child: CircularProgressIndicator());
         }
         if (snapshot.hasError) {
@@ -1015,53 +1094,49 @@ Future<void> _generateNewMemory() async {
         }
 
         final items = snapshot.data ?? [];
+        final groupedItems = _groupItemsByDate(items);
         
         return CustomScrollView(
           slivers: [
-            SliverToBoxAdapter(
-              child: _buildMemoriesCarousel(),
-            ),
+            SliverToBoxAdapter(child: _buildMemoriesCarousel()),
             
             if (items.isEmpty)
-              const SliverFillRemaining(
-                child: Center(child: Text('Ваша галерея порожня')),
-              )
-            else
-              ..._groupItemsByDate(items).entries.map((entry) {
-                final date = entry.key;
-                final itemsForDate = entry.value;
+              const SliverFillRemaining(child: Center(child: Text('Ваша галерея порожня'))),
+            
+            ...groupedItems.entries.map((entry) {
+              final date = entry.key;
+              final itemsForDate = entry.value;
+              final layout = _generateLayout(itemsForDate.length, date);
 
-                return SliverStickyHeader(
-                  header: Container(
-                    // <--- ВИПРАВЛЕННЯ 1: Робимо фон повністю непрозорим
-                    color: Theme.of(context).scaffoldBackgroundColor,
-                    height: 50.0,
-                    padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                    alignment: Alignment.centerLeft,
-                    child: Text(formatDateHeader(date), style: Theme.of(context).textTheme.titleLarge),
-                  ),
-                  sliver: SliverPadding( // Додаємо відступи навколо сітки
+              return SliverStickyHeader(
+                header: Container(
+                  color: Theme.of(context).scaffoldBackgroundColor, height: 50.0,
+                  padding: const EdgeInsets.symmetric(horizontal: 16.0), alignment: Alignment.centerLeft,
+                  child: Text(formatDateHeader(date), style: Theme.of(context).textTheme.titleLarge),
+                ),
+                
+                // <--- КЛЮЧОВЕ ВИПРАВЛЕННЯ ТУТ
+                sliver: SliverToBoxAdapter(
+                  child: Padding(
                     padding: const EdgeInsets.all(4.0),
-                    sliver: SliverGrid(
-                      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                        crossAxisCount: 4,
-                        crossAxisSpacing: 4,
-                        mainAxisSpacing: 4,
-                      ),
-                      delegate: SliverChildBuilderDelegate(
-                        (context, index) {
-                          final item = itemsForDate[index];
-                          return OpenContainer(
+                    // Використовуємо правильний віджет StaggeredGrid.count
+                    child: StaggeredGrid.count(
+                      crossAxisCount: 4, mainAxisSpacing: 4, crossAxisSpacing: 4,
+                      children: List.generate(itemsForDate.length, (index) {
+                        final item = itemsForDate[index];
+                        final tileSize = layout[index];
+                        return StaggeredGridTile.count(
+                          crossAxisCellCount: tileSize.crossAxis,
+                          mainAxisCellCount: tileSize.mainAxis,
+                          child: OpenContainer(
                             transitionDuration: const Duration(milliseconds: 500),
-                            tappable: false,
-                            closedColor: Colors.transparent, openColor: Colors.black, middleColor: Colors.black,
-                            closedElevation: 0, openElevation: 0,
+                            closedColor: Colors.transparent, openColor: Colors.black,
+                            closedElevation: 0, openElevation: 0, tappable: false,
                             closedBuilder: (ctx, open) => GestureDetector(
                               onTap: () {
                                 widget.blurAnimationController.forward();
                                 open();
                               },
-                              // <--- ВИПРАВЛЕННЯ 2: Код для прев'ю, який був пропущений
                               child: ClipRRect(
                                 borderRadius: BorderRadius.circular(8.0),
                                 child: Stack(
@@ -1072,49 +1147,39 @@ Future<void> _generateNewMemory() async {
                                       builder: (context, urlSnapshot) {
                                         if (!urlSnapshot.hasData || urlSnapshot.data!.isEmpty) return const SizedBox.shrink();
                                         final thumbnailUrl = '${urlSnapshot.data}/thumbnail/${item.thumbnail}';
-                                        return CachedNetworkImage(
-                                          imageUrl: thumbnailUrl,
-                                          fit: BoxFit.cover,
-                                          placeholder: (c, u) => Container(color: Colors.grey.withOpacity(0.1)),
-                                          errorWidget: (c, u, e) => const Icon(Icons.error),
-                                        );
+                                        return CachedNetworkImage(imageUrl: thumbnailUrl, fit: BoxFit.cover, placeholder: (c, u) => Container(color: Colors.grey.withOpacity(0.1)), errorWidget: (c, u, e) => const Icon(Icons.error));
                                       },
                                     ),
-                                    if (item.type == 'video')
-                                      Center(
-                                        child: Container(
-                                          decoration: BoxDecoration(color: Colors.black.withOpacity(0.5), shape: BoxShape.circle),
-                                          child: const Icon(Icons.play_arrow, color: Colors.white, size: 24),
-                                        ),
-                                      ),
+                                    if (item.type == 'video') Center(child: Container(decoration: BoxDecoration(color: Colors.black.withOpacity(0.5), shape: BoxShape.circle), child: const Icon(Icons.play_arrow, color: Colors.white, size: 24))),
                                   ],
                                 ),
                               ),
                             ),
-                            // <--- ВИПРАВЛЕННЯ 3: Передаємо правильні параметри
                             openBuilder: (ctx, close) => MediaViewerScreen(
-                              galleryItems: items, // Повний список
-                              initialIndex: items.indexOf(item), // Індекс у повному списку
+                              galleryItems: items,
+                              initialIndex: items.indexOf(item),
                             ),
                             onClosed: (_) => widget.blurAnimationController.reverse(),
-                          );
-                        },
-                        childCount: itemsForDate.length,
-                      ),
+                          ),
+                        );
+                      }),
                     ),
                   ),
-                );
-              }).toList(),
+                ),
+              );
+            }).toList(),
               
-              SliverToBoxAdapter(
-                 child: SizedBox(height: MediaQuery.of(context).padding.bottom + 90),
-              )
+            SliverToBoxAdapter(
+               child: SizedBox(height: MediaQuery.of(context).padding.bottom + 90),
+            )
           ],
         );
       },
-    );
-  }
+    ),
+  );
 }
+}
+// --- КІНЕЦЬ КЛАСУ _GalleryScreenState ---
 
 
 
